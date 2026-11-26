@@ -149,7 +149,7 @@ async def send_assignment(bot, user_id: int, code: str, game: dict) -> bool:
         f"🎁 Тайный Санта!\n\n"
         f"Вы дарите подарок: {name} {username}\n\n"
         f"Пожелания:\n{wish}\n\n"
-        f"Код игры: {code}"
+        f"GameID: {code}"
     )
 
     try:
@@ -187,12 +187,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "🎅 Привет! Это бот для организации Тайного Санты.\n\n"
         "Команды:\n"
         "/create — создать новую игру\n"
-        "/join КОД — присоединиться к игре\n"
+        "/join GameID — присоединиться к игре\n"
         "/mygames — список ваших игр (с кнопками)\n"
-        "/setwish [КОД] текст — указать пожелания\n"
-        "/participants [КОД] — список участников\n"
-        "/draw [КОД] — розыгрыш (организатор)\n"
-        "/close [КОД|all] — закрыть игру или все игры (организатор)\n"
+        "/setwish [GameID] текст — указать пожелания\n"
+        "/participants [GameID] — список участников\n"
+        "/draw [GameID] — розыгрыш (организатор)\n"
+        "/close [GameID|all] — закрыть игру или все игры (организатор)\n"
         "/myresult — получить свой результат\n"
         "/info — информация о боте\n"
         "/help — помощь\n\n"
@@ -244,7 +244,7 @@ async def show_game_info(code: str, game: dict, user_id: int) -> str:
     parts = len(game.get("participants", {}))
     drawn = "Да" if game.get("assignments") else "Нет"
     return (
-        f"Игра: {code}\n"
+        f"GameID: {code}\n"
         f"Статус: {status}\n"
         f"Ваша роль: {role}\n"
         f"Участников: {parts}\n"
@@ -390,19 +390,19 @@ async def create_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     save_games()
     await update.message.reply_text(
         f"✅ Игра создана!\n\n"
-        f"Код игры: {game_code}\n\n"
+        f"GameID: {game_code}\n\n"
         f"Отправьте друзьям: /join {game_code}"
     )
 
 
 async def join_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
-        await update.message.reply_text("Использование: /join КОД")
+        await update.message.reply_text("Использование: /join GameID")
         return
 
     code = context.args[0].upper()
     if code not in games:
-        await update.message.reply_text("❌ Игра с таким кодом не найдена.")
+        await update.message.reply_text("❌ Игра с таким GameID не найдена.")
         return
 
     game = games[code]
@@ -427,7 +427,7 @@ async def join_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def set_wish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
-        await update.message.reply_text("Использование: /setwish [КОД] Ваши пожелания")
+        await update.message.reply_text("Использование: /setwish [GameID] Ваши пожелания")
         return
 
     user_id = update.effective_user.id
@@ -623,7 +623,6 @@ def main() -> None:
         MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, check_and_send_pending)
     )
 
-    # Регистрируем меню команд при запуске
     application.post_init = setup_bot_commands
 
     logger.info(f"Бот запущен... Версия {BOT_VERSION}")
