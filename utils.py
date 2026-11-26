@@ -106,11 +106,14 @@ def build_edit_keyboard(code: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton("💰 Сумма", callback_data=f"edit_amount:{code}"),
         ],
         [
+            InlineKeyboardButton("🆔 Изменить ID", callback_data=f"edit_id:{code}"),
             InlineKeyboardButton("🛡 Избегать on/off", callback_data=f"toggle_avoid:{code}"),
-            InlineKeyboardButton("📤 Экспорт", callback_data=f"export:{code}"),
         ],
         [
+            InlineKeyboardButton("📤 Экспорт", callback_data=f"export:{code}"),
             InlineKeyboardButton("🔗 Импорт пар", callback_data=f"import_prev:{code}"),
+        ],
+        [
             InlineKeyboardButton("← Назад", callback_data=f"info:{code}"),
         ],
     ]
