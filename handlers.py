@@ -565,6 +565,7 @@ async def private_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def setup(app):
     cmds = [
         BotCommand("start", "Помощь"),
+        BotCommand("help", "Помощь"),
         BotCommand("create", "Создать игру"),
         BotCommand("setintro", "Вступительное"),
         BotCommand("setamount", "Сумма на подарок"),
