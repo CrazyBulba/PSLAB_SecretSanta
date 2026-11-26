@@ -1,12 +1,14 @@
 """
 Бот для Тайного Санты (Secret Santa) в Telegram.
-С возможностью повторного розыгрыша и отдельным закрытием игры.
+С возможностью повторного розыгрыша, закрытием игры и сохранением состояния между перезапусками.
 """
 
+import json
 import logging
 import os
 import random
 import uuid
+from pathlib import Path
 from typing import Dict, Any
 
 from dotenv import load_dotenv
@@ -22,7 +24,11 @@ from telegram.ext import (
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 
-# Хранилище игр в памяти
+# Путь к файлу с данными. На Railway при монтировании Volume в /data используйте /data/games.json
+DATA_DIR = Path(os.getenv("DATA_DIR", "/data" if Path("/data").exists() else "."))
+DATA_FILE = DATA_DIR / "games.json"
+
+# Хранилище игр
 games: Dict[str, Dict[str, Any]] = {}
 
 logging.basicConfig(
@@ -30,6 +36,52 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+
+
+def load_games() -> None:
+    """Загружает игры из файла."""
+    global games
+    if DATA_FILE.exists():
+        try:
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            # JSON сохраняет ключи как строки — преобразуем user_id обратно в int
+            games = {}
+            for code, game in raw.items():
+                game["participants"] = {
+                    int(uid): info for uid, info in game.get("participants", {}).items()
+                }
+                if "assignments" in game:
+                    game["assignments"] = {
+                        int(k): int(v) for k, v in game["assignments"].items()
+                    }
+                games[code] = game
+            logger.info(f"Загружено игр: {len(games)}")
+        except Exception as e:
+            logger.error(f"Ошибка загрузки игр: {e}")
+            games = {}
+    else:
+        logger.info("Файл с играми не найден, начинаем с пустого хранилища")
+        games = {}
+
+
+def save_games() -> None:
+    """Сохраняет игры в файл."""
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        # Преобразуем int-ключи в строки для JSON
+        to_save = {}
+        for code, game in games.items():
+            g = dict(game)
+            g["participants"] = {str(uid): info for uid, info in game.get("participants", {}).items()}
+            if "assignments" in game:
+                g["assignments"] = {str(k): v for k, v in game["assignments"].items()}
+            to_save[code] = g
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(to_save, f, ensure_ascii=False, indent=2)
+        logger.debug("Игры сохранены")
+    except Exception as e:
+        logger.error(f"Ошибка сохранения игр: {e}")
 
 
 def make_derangement(items: list) -> dict:
@@ -68,11 +120,13 @@ async def send_assignment(bot, user_id: int, code: str, game: dict) -> bool:
     try:
         await bot.send_message(chat_id=user_id, text=text)
         game["participants"][user_id]["notified"] = True
+        save_games()
         logger.info(f"Результат отправлен пользователю {user_id} (игра {code})")
         return True
     except Exception as e:
         logger.error(f"Не удалось отправить сообщение {user_id}: {e}")
         game["participants"][user_id]["notified"] = False
+        save_games()
         return False
 
 
@@ -146,6 +200,7 @@ async def create_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         "username": user.username,
         "notified": False,
     }
+    save_games()
     await update.message.reply_text(
         f"✅ Игра создана!\n\n"
         f"Код игры: {game_code}\n\n"
@@ -181,6 +236,7 @@ async def join_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "username": user.username,
         "notified": False,
     }
+    save_games()
     await update.message.reply_text(
         f"✅ Вы присоединились к игре {code}!\n"
         f"Не забудьте указать пожелания: /setwish Ваши пожелания\n\n"
@@ -201,6 +257,7 @@ async def set_wish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     for code, game in games.items():
         if user_id in game["participants"] and not game["closed"]:
             game["participants"][user_id]["wishlist"] = wish
+            save_games()
             await update.message.reply_text("✅ Пожелания сохранены!")
             found = True
             break
@@ -261,6 +318,8 @@ async def draw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     for uid in participants:
         target_game["participants"][uid]["notified"] = False
 
+    save_games()
+
     bot = context.bot
     success = 0
     failed_names = []
@@ -297,6 +356,7 @@ async def close_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     for code, game in games.items():
         if game["organizer"] == user_id and not game["closed"]:
             game["closed"] = True
+            save_games()
             await update.message.reply_text(
                 f"✅ Игра {code} закрыта.\n"
                 f"Больше нельзя присоединяться и крутить рулетку."
@@ -312,6 +372,8 @@ def main() -> None:
     if not TOKEN:
         print("Ошибка: установите BOT_TOKEN в .env файле")
         return
+
+    load_games()
 
     application = Application.builder().token(TOKEN).build()
 
