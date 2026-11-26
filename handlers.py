@@ -4,6 +4,7 @@
 
 import logging
 import time
+import re
 from typing import Optional, Tuple
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
@@ -154,6 +155,21 @@ async def handle_awaiting(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         manager.games[code]["gift_amount"] = text
         manager.save()
         await update.message.reply_text(f"✅ Сумма для {code}: {text}")
+        return True
+
+    if kind == "new_id" and code and code in manager.games:
+        new_code = text.upper().strip()
+        if not re.fullmatch(r"[A-Z0-9]{4,10}", new_code):
+            await update.message.reply_text("❌ GameID должен состоять из 4–10 латинских букв и цифр.")
+            return True
+        if new_code in manager.games:
+            await update.message.reply_text("❌ Такой GameID уже занят.")
+            return True
+        # Переносим игру
+        game = manager.games.pop(code)
+        manager.games[new_code] = game
+        manager.save()
+        await update.message.reply_text(f"✅ GameID изменён: {code} → {new_code}")
         return True
 
     return False
@@ -345,6 +361,14 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         context.user_data["awaiting"] = {"type": "amount", "code": code}
         await query.edit_message_text(PROMPTS["amount"])
+        return
+
+    if action == "edit_id":
+        if game.get("organizer") != uid:
+            await query.edit_message_text("Нет прав")
+            return
+        context.user_data["awaiting"] = {"type": "new_id", "code": code}
+        await query.edit_message_text(PROMPTS["new_id"])
         return
 
     if action == "toggle_avoid":
