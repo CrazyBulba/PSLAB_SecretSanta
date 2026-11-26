@@ -106,7 +106,7 @@ def get_user_games(user_id: int, as_organizer: bool = False, only_active: bool =
     return result
 
 
-def build_game_keyboard(user_games: List[Tuple[str, Dict]], action: str) -> InlineKeyboardMarkup:
+def build_game_keyboard(user_games: List[Tuple[str, Dict]], action: str, include_all: bool = False) -> InlineKeyboardMarkup:
     """Создаёт инлайн-клавиатуру для выбора игры."""
     buttons = []
     for code, game in user_games:
@@ -114,6 +114,10 @@ def build_game_keyboard(user_games: List[Tuple[str, Dict]], action: str) -> Inli
         parts = len(game.get("participants", {}))
         text = f"{status} {code} ({parts} чел.)"
         buttons.append([InlineKeyboardButton(text, callback_data=f"{action}:{code}")])
+
+    if include_all and len(user_games) > 1:
+        buttons.append([InlineKeyboardButton("🔒 Закрыть все", callback_data=f"{action}:ALL")])
+
     return InlineKeyboardMarkup(buttons)
 
 
@@ -188,7 +192,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/setwish [КОД] текст — указать пожелания\n"
         "/participants [КОД] — список участников\n"
         "/draw [КОД] — розыгрыш (организатор)\n"
-        "/close [КОД] — закрыть игру (организатор)\n"
+        "/close [КОД|all] — закрыть игру или все игры (организатор)\n"
         "/myresult — получить свой результат\n"
         "/info — информация о боте\n"
         "/help — помощь\n\n"
@@ -258,6 +262,20 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     action, code = data.split(":", 1)
     user_id = query.from_user.id
+
+    # Обработка «Закрыть все»
+    if action == "close" and code == "ALL":
+        user_games = get_user_games(user_id, as_organizer=True, only_active=True)
+        if not user_games:
+            await query.edit_message_text("Нет активных игр для закрытия.")
+            return
+        closed_count = 0
+        for c, g in user_games:
+            g["closed"] = True
+            closed_count += 1
+        save_games()
+        await query.edit_message_text(f"✅ Закрыто игр: {closed_count}")
+        return
 
     if code not in games:
         await query.edit_message_text("❌ Игра больше не существует.")
@@ -527,13 +545,24 @@ async def draw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def close_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    code = context.args[0].upper() if context.args else None
+    arg = context.args[0].upper() if context.args else None
     user_games = get_user_games(user_id, as_organizer=True, only_active=True)
 
     if not user_games:
         await update.message.reply_text("У вас нет активных игр для закрытия.")
         return
 
+    # Закрыть все
+    if arg in ("ALL", "ВСЕ", "ЗАКРЫТЬВСЕ"):
+        closed_count = 0
+        for c, g in user_games:
+            g["closed"] = True
+            closed_count += 1
+        save_games()
+        await update.message.reply_text(f"✅ Закрыто игр: {closed_count}")
+        return
+
+    code = arg
     if code:
         game = next((g for c, g in user_games if c == code), None)
         if not game:
@@ -542,7 +571,7 @@ async def close_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     elif len(user_games) == 1:
         code, game = user_games[0]
     else:
-        keyboard = build_game_keyboard(user_games, "close")
+        keyboard = build_game_keyboard(user_games, "close", include_all=True)
         await update.message.reply_text("Выберите игру для закрытия:", reply_markup=keyboard)
         return
 
