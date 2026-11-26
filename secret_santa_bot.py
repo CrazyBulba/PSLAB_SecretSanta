@@ -1,6 +1,6 @@
 """
-Secret Santa Telegram Bot — v1.12.1
-Упрощённый текст запроса вступительного.
+Secret Santa Telegram Bot — v1.12.2
+Упрощённое сообщение после создания игры.
 """
 
 import json
@@ -241,6 +241,15 @@ PROMPTS = {
 }
 
 
+def create_success_message(code: str) -> str:
+    return (
+        f"✅ Игра создана!\n"
+        f"GameID: {code}\n\n"
+        f"Для присоединения к игре другим участникам необходимо отправить боту:\n"
+        f"/join {code}"
+    )
+
+
 async def handle_awaiting(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     awaiting = context.user_data.get("awaiting")
     if not awaiting or not update.message or not update.message.text:
@@ -295,12 +304,7 @@ async def handle_awaiting(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         amount = "" if text.lower() in ("пропустить", "skip", "-", "нет") else text
         intro = context.user_data.pop("pending_intro", "")
         new_code = manager.create(update.effective_user, intro, amount)
-        msg = f"✅ Игра создана!\nGameID: {new_code}\n\n/join {new_code}"
-        if intro:
-            msg += "\n\n📝 Вступительное сохранено."
-        if amount:
-            msg += f"\n💰 Сумма: {amount}"
-        await update.message.reply_text(msg)
+        await update.message.reply_text(create_success_message(new_code))
         return True
 
     if kind == "amount" and code and code in manager.games:
@@ -411,10 +415,7 @@ async def cmd_create(update: Update, context: ContextTypes.DEFAULT_TYPE):
         intro = " ".join(context.args)
         amount = extract_amount(intro)
         code = manager.create(update.effective_user, intro, amount)
-        msg = f"✅ Игра создана!\nGameID: {code}\n\n/join {code}"
-        if intro:
-            msg += "\n\n📝 Вступительное сохранено."
-        await update.message.reply_text(msg)
+        await update.message.reply_text(create_success_message(code))
         return
     context.user_data["awaiting"] = {"type": "create_intro"}
     await update.message.reply_text(
