@@ -1,6 +1,6 @@
 """
-Secret Santa Telegram Bot — v1.11.0
-Кнопка «Редактировать» в меню игры.
+Secret Santa Telegram Bot — v1.12.0
+При создании спрашивает сумму после вступительного. Кнопка «Удалить».
 """
 
 import json
@@ -195,7 +195,7 @@ async def select_game(
         for c, g in games
     ]
     if include_all and len(games) > 1:
-        buttons.append([InlineKeyboardButton("🔒 Закрыть все", callback_data=f"{action}:ALL")])
+        buttons.append([InlineKeyboardButton("🗑 Удалить все", callback_data=f"{action}:ALL")])
     await update.message.reply_text("Выберите игру:", reply_markup=InlineKeyboardMarkup(buttons))
     return None
 
@@ -234,7 +234,7 @@ async def check_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─── Conversational state ───
 
 PROMPTS = {
-    "intro": "📝 Напишите вступительный текст (около 200 слов).\nНе забудьте указать сумму подарка и сроки.",
+    "intro": "📝 Напишите вступительный текст (около 200 слов).\nНе забудьте указать сроки.",
     "wish": "🎁 Напишите ваши пожелания к подарку.",
     "import_pairs": "🔗 Отправьте пары в формате:\n@user1:@user2 @user3:@user4",
     "amount": "💰 Укажите сумму на подарок (например: 3000 рублей или 50$)",
@@ -286,7 +286,15 @@ async def handle_awaiting(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if kind == "create_intro":
         intro = "" if text.lower() in ("пропустить", "skip", "-", "нет") else text
-        amount = extract_amount(intro) if intro else ""
+        # Сохраняем intro и спрашиваем сумму
+        context.user_data["pending_intro"] = intro
+        context.user_data["awaiting"] = {"type": "create_amount"}
+        await update.message.reply_text(PROMPTS["amount"] + "\n\nИли отправьте «пропустить».")
+        return True
+
+    if kind == "create_amount":
+        amount = "" if text.lower() in ("пропустить", "skip", "-", "нет") else text
+        intro = context.user_data.pop("pending_intro", "")
         new_code = manager.create(update.effective_user, intro, amount)
         msg = f"✅ Игра создана!\nGameID: {new_code}\n\n/join {new_code}"
         if intro:
@@ -390,7 +398,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/participants — участники\n"
         "/draw — розыгрыш\n"
         "/export — экспорт пар\n"
-        "/close [all] — закрыть\n"
+        "/close [all] — удалить\n"
         "/avoid on|off\n"
         "/import_previous\n"
         "/import_from OLDCODE\n"
@@ -682,7 +690,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ])
             buttons.append([
                 InlineKeyboardButton("✏️ Редактировать", callback_data=f"edit:{code}"),
-                InlineKeyboardButton("🔒 Закрыть", callback_data=f"close:{code}"),
+                InlineKeyboardButton("🗑 Удалить", callback_data=f"close:{code}"),
             ])
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons) if buttons else None)
         return
@@ -807,7 +815,7 @@ async def setup(app: Application):
         BotCommand("participants", "Участники"),
         BotCommand("draw", "Розыгрыш"),
         BotCommand("export", "Экспорт"),
-        BotCommand("close", "Закрыть"),
+        BotCommand("close", "Удалить игру"),
         BotCommand("avoid", "Избегать прошлые"),
         BotCommand("import_previous", "Загрузить пары"),
         BotCommand("import_from", "Импорт из игры"),
