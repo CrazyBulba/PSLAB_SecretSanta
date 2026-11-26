@@ -1,6 +1,6 @@
 """
-Secret Santa Telegram Bot — v1.9.0
-Конверсационные команды: вопрос → ответ следующим сообщением.
+Secret Santa Telegram Bot — v1.9.1
+Закрытые игры удаляются и не показываются.
 """
 
 import json
@@ -38,6 +38,8 @@ class GameManager:
         try:
             raw = json.loads(DATA_FILE.read_text(encoding="utf-8"))
             for code, g in raw.items():
+                if g.get("closed"):
+                    continue  # не загружаем уже закрытые
                 g["participants"] = {int(k): v for k, v in g.get("participants", {}).items()}
                 if "assignments" in g:
                     g["assignments"] = {int(k): int(v) for k, v in g["assignments"].items()}
@@ -63,6 +65,11 @@ class GameManager:
             DATA_FILE.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception as e:
             logger.error(f"Save error: {e}")
+
+    def delete(self, code: str):
+        if code in self.games:
+            del self.games[code]
+            self.save()
 
     def user_games(self, user_id: int, organizer: bool = False, active_only: bool = False) -> List[Tuple[str, Dict]]:
         res = []
@@ -174,7 +181,7 @@ async def select_game(
         return games[0]
 
     buttons = [
-        [InlineKeyboardButton(f"{'❌' if g.get('closed') else '✅'} {c} ({len(g['participants'])} чел.)", callback_data=f"{action}:{c}")]
+        [InlineKeyboardButton(f"✅ {c} ({len(g['participants'])} чел.)", callback_data=f"{action}:{c}")]
         for c, g in games
     ]
     if include_all and len(games) > 1:
@@ -206,7 +213,7 @@ async def send_result(bot, uid: int, code: str, game: dict) -> bool:
 async def check_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     sent = False
-    for code, g in manager.games.items():
+    for code, g in list(manager.games.items()):
         if g.get("assignments") and uid in g["participants"] and not g["participants"][uid].get("notified"):
             if await send_result(context.bot, uid, code, g):
                 sent = True
@@ -224,7 +231,6 @@ PROMPTS = {
 
 
 async def handle_awaiting(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Обрабатывает ответ на вопрос бота. Возвращает True если обработал."""
     awaiting = context.user_data.get("awaiting")
     if not awaiting or not update.message or not update.message.text:
         return False
@@ -291,7 +297,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/participants — участники\n"
         "/draw — розыгрыш\n"
         "/export — экспорт пар\n"
-        "/close [all] — закрыть\n"
+        "/close [all] — закрыть (удалить)\n"
         "/avoid on|off\n"
         "/import_previous — загрузить пары\n"
         "/import_from OLDCODE\n"
@@ -344,15 +350,15 @@ async def cmd_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_mygames(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    games = manager.user_games(update.effective_user.id)
+    games = manager.user_games(update.effective_user.id, active_only=True)
     if not games:
-        await update.message.reply_text("Нет игр. /create")
+        await update.message.reply_text("Нет активных игр. /create")
         return
     buttons = [
-        [InlineKeyboardButton(f"{'❌' if g.get('closed') else '✅'} {c} ({len(g['participants'])})", callback_data=f"info:{c}")]
+        [InlineKeyboardButton(f"✅ {c} ({len(g['participants'])})", callback_data=f"info:{c}")]
         for c, g in games
     ]
-    await update.message.reply_text("Ваши игры:", reply_markup=InlineKeyboardMarkup(buttons))
+    await update.message.reply_text("Ваши активные игры:", reply_markup=InlineKeyboardMarkup(buttons))
 
 
 async def cmd_setwish(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -407,7 +413,7 @@ async def cmd_draw(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    res = await select_game(update, context, organizer=True, active=False, action="export")
+    res = await select_game(update, context, organizer=True, active=True, action="export")
     if not res:
         return
     code, game = res
@@ -431,18 +437,17 @@ async def cmd_close(update: Update, context: ContextTypes.DEFAULT_TYPE):
     arg = (context.args or [""])[0].upper()
     if arg in ("ALL", "ВСЕ"):
         games = manager.user_games(update.effective_user.id, organizer=True, active_only=True)
-        for _, g in games:
-            g["closed"] = True
-        manager.save()
-        await update.message.reply_text(f"✅ Закрыто {len(games)}")
+        count = len(games)
+        for c, _ in games:
+            manager.delete(c)
+        await update.message.reply_text(f"✅ Удалено игр: {count}")
         return
     res = await select_game(update, context, organizer=True, action="close", include_all=True)
     if not res:
         return
     code, game = res
-    game["closed"] = True
-    manager.save()
-    await update.message.reply_text(f"✅ {code} закрыта")
+    manager.delete(code)
+    await update.message.reply_text(f"✅ Игра {code} удалена")
 
 
 async def cmd_avoid(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -541,10 +546,10 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if action == "close" and code == "ALL":
         games = manager.user_games(uid, organizer=True, active_only=True)
-        for _, g in games:
-            g["closed"] = True
-        manager.save()
-        await query.edit_message_text(f"✅ Закрыто {len(games)}")
+        count = len(games)
+        for c, _ in games:
+            manager.delete(c)
+        await query.edit_message_text(f"✅ Удалено игр: {count}")
         return
 
     if code not in manager.games:
@@ -554,7 +559,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if action == "info":
         role = "орг" if game.get("organizer") == uid else "уч"
-        status = "закрыта" if game.get("closed") else "активна"
+        status = "активна"
         drawn = "да" if game.get("assignments") else "нет"
         avoid = "вкл" if game.get("avoid_previous") else "выкл"
         intro = "да" if game.get("intro") else "нет"
@@ -565,17 +570,17 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Вступительное: {intro}"
         )
         buttons = []
-        if game.get("organizer") == uid and not game.get("closed"):
+        if game.get("organizer") == uid:
             buttons.append([
                 InlineKeyboardButton("🎲 Розыгрыш", callback_data=f"draw:{code}"),
                 InlineKeyboardButton("👥 Уч", callback_data=f"participants:{code}"),
             ])
-            buttons.append([InlineKeyboardButton("🔒 Закрыть", callback_data=f"close:{code}")])
+            buttons.append([InlineKeyboardButton("🔒 Закрыть (удалить)", callback_data=f"close:{code}")])
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons) if buttons else None)
         return
 
     if action == "draw":
-        if game.get("organizer") != uid or game.get("closed"):
+        if game.get("organizer") != uid:
             await query.edit_message_text("Нет прав")
             return
         parts = list(game["participants"].keys())
@@ -595,9 +600,8 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if game.get("organizer") != uid:
             await query.edit_message_text("Нет прав")
             return
-        game["closed"] = True
-        manager.save()
-        await query.edit_message_text(f"✅ {code} закрыта")
+        manager.delete(code)
+        await query.edit_message_text(f"✅ Игра {code} удалена")
         return
 
     if action == "participants":
@@ -639,7 +643,6 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def private_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает обычные сообщения: сначала ответы на вопросы, потом pending results."""
     if await handle_awaiting(update, context):
         return
     await check_pending(update, context)
@@ -656,7 +659,7 @@ async def setup(app: Application):
         BotCommand("participants", "Участники"),
         BotCommand("draw", "Розыгрыш"),
         BotCommand("export", "Экспорт"),
-        BotCommand("close", "Закрыть"),
+        BotCommand("close", "Закрыть (удалить)"),
         BotCommand("avoid", "Избегать прошлые"),
         BotCommand("import_previous", "Загрузить пары"),
         BotCommand("import_from", "Импорт из игры"),
