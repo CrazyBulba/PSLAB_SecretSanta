@@ -265,9 +265,12 @@ async def handle_awaiting(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return True
 
     if kind == "create_intro":
-        # создаём игру с intro
-        code = manager.create(update.effective_user, text)
-        await update.message.reply_text(f"✅ Игра создана!\nGameID: {code}\n\n/join {code}\n\n📝 Вступительное сохранено.")
+        intro = "" if text.lower() in ("пропустить", "skip", "-", "нет") else text
+        new_code = manager.create(update.effective_user, intro)
+        msg = f"✅ Игра создана!\nGameID: {new_code}\n\n/join {new_code}"
+        if intro:
+            msg += "\n\n📝 Вступительное сохранено."
+        await update.message.reply_text(msg)
         return True
 
     return False
@@ -303,7 +306,6 @@ async def cmd_create(update: Update, context: ContextTypes.DEFAULT_TYPE):
         code = manager.create(update.effective_user, intro)
         await update.message.reply_text(f"✅ Игра создана!\nGameID: {code}\n\n/join {code}\n\n📝 Вступительное сохранено.")
         return
-    # Спрашиваем вступительное
     context.user_data["awaiting"] = {"type": "create_intro"}
     await update.message.reply_text(
         "🎄 Создаём игру.\n\n" + PROMPTS["intro"] + "\n\nИли отправьте «пропустить», если без вступительного."
@@ -321,7 +323,6 @@ async def cmd_setintro(update: Update, context: ContextTypes.DEFAULT_TYPE):
         manager.save()
         await update.message.reply_text(f"✅ Вступительное для {code} сохранено.")
         return
-    # Спрашиваем
     context.user_data["awaiting"] = {"type": "intro", "code": code}
     await update.message.reply_text(PROMPTS["intro"])
 
