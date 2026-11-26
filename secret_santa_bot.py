@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -263,7 +263,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     action, code = data.split(":", 1)
     user_id = query.from_user.id
 
-    # Обработка «Закрыть все»
     if action == "close" and code == "ALL":
         user_games = get_user_games(user_id, as_organizer=True, only_active=True)
         if not user_games:
@@ -552,7 +551,6 @@ async def close_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text("У вас нет активных игр для закрытия.")
         return
 
-    # Закрыть все
     if arg in ("ALL", "ВСЕ", "ЗАКРЫТЬВСЕ"):
         closed_count = 0
         for c, g in user_games:
@@ -580,6 +578,25 @@ async def close_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.message.reply_text(f"✅ Игра {code} закрыта.")
 
 
+async def setup_bot_commands(application: Application) -> None:
+    """Регистрирует команды бота для меню в Telegram."""
+    commands = [
+        BotCommand("start", "Приветствие и помощь"),
+        BotCommand("create", "Создать новую игру"),
+        BotCommand("join", "Присоединиться к игре"),
+        BotCommand("mygames", "Мои игры"),
+        BotCommand("setwish", "Указать пожелания"),
+        BotCommand("participants", "Список участников"),
+        BotCommand("draw", "Провести розыгрыш"),
+        BotCommand("close", "Закрыть игру"),
+        BotCommand("myresult", "Получить результат"),
+        BotCommand("info", "Информация о боте"),
+        BotCommand("help", "Помощь"),
+    ]
+    await application.bot.set_my_commands(commands)
+    logger.info("Меню команд зарегистрировано")
+
+
 def main() -> None:
     if not TOKEN:
         print("Ошибка: установите BOT_TOKEN в .env файле")
@@ -605,6 +622,9 @@ def main() -> None:
     application.add_handler(
         MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, check_and_send_pending)
     )
+
+    # Регистрируем меню команд при запуске
+    application.post_init = setup_bot_commands
 
     logger.info(f"Бот запущен... Версия {BOT_VERSION}")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
