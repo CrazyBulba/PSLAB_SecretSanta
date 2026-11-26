@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import random
+import time
 import uuid
 from pathlib import Path
 from typing import Dict, Any
@@ -27,6 +28,19 @@ TOKEN = os.getenv("BOT_TOKEN")
 # Путь к файлу с данными. На Railway при монтировании Volume в /data используйте /data/games.json
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data" if Path("/data").exists() else "."))
 DATA_FILE = DATA_DIR / "games.json"
+
+# Версия из файла VERSION (контроль версий в Git)
+VERSION_FILE = Path("VERSION")
+def get_version() -> str:
+    try:
+        if VERSION_FILE.exists():
+            return VERSION_FILE.read_text(encoding="utf-8").strip()
+    except Exception:
+        pass
+    return "unknown"
+
+BOT_VERSION = get_version()
+START_TIME = time.time()
 
 # Хранилище игр
 games: Dict[str, Dict[str, Any]] = {}
@@ -160,6 +174,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/draw — провести / перекрутить розыгрыш (организатор)\n"
         "/close — закрыть игру (организатор)\n"
         "/myresult — получить свой результат (если ещё не получил)\n"
+        "/info — информация о боте и версии\n"
         "/help — помощь\n\n"
         "Важно: чтобы получить результат, нужно хотя бы раз написать боту в личку."
     )
@@ -168,6 +183,29 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await start(update, context)
+
+
+async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Показать информацию о боте, версию и статистику."""
+    uptime_sec = int(time.time() - START_TIME)
+    hours, rem = divmod(uptime_sec, 3600)
+    minutes, seconds = divmod(rem, 60)
+    uptime_str = f"{hours}ч {minutes}м {seconds}с"
+
+    active_games = sum(1 for g in games.values() if not g.get("closed"))
+    total_participants = sum(len(g.get("participants", {})) for g in games.values())
+
+    text = (
+        f"ℹ️ Информация о боте\n\n"
+        f"Версия: {BOT_VERSION}\n"
+        f"Время работы: {uptime_str}\n"
+        f"Активных игр: {active_games}\n"
+        f"Всего игр: {len(games)}\n"
+        f"Всего участников: {total_participants}\n\n"
+        f"Данные сохраняются в games.json\n"
+        f"Репозиторий: github.com/CrazyBulba/PSLAB_SecretSanta"
+    )
+    await update.message.reply_text(text)
 
 
 async def myresult(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -379,6 +417,7 @@ def main() -> None:
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("info", info_command))
     application.add_handler(CommandHandler("create", create_game))
     application.add_handler(CommandHandler("join", join_game))
     application.add_handler(CommandHandler("setwish", set_wish))
@@ -392,7 +431,7 @@ def main() -> None:
         MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, check_and_send_pending)
     )
 
-    logger.info("Бот запущен...")
+    logger.info(f"Бот запущен... Версия {BOT_VERSION}")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
