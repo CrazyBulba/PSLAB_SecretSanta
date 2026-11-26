@@ -402,6 +402,38 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             wish = info["wishlist"] or "—"
             lines.append(f"• {name} — {wish}")
         await query.edit_message_text("\n".join(lines))
+        return
+
+    if action == "export":
+        if game.get("organizer") != user_id:
+            await query.edit_message_text("❌ Только организатор может экспортировать.")
+            return
+        if not game.get("assignments"):
+            await query.edit_message_text("❌ В этой игре ещё не было розыгрыша.")
+            return
+
+        parts = game["participants"]
+        lines = []
+        for giver_id, receiver_id in game["assignments"].items():
+            g_key = get_user_key(giver_id, parts)
+            r_key = get_user_key(receiver_id, parts)
+            if g_key.startswith("id:") or r_key.startswith("id:"):
+                continue
+            lines.append(f"@{g_key}:@{r_key}")
+
+        if not lines:
+            await query.edit_message_text("❌ Нет пар с username для экспорта.")
+            return
+
+        export_text = " ".join(lines)
+        reply = (
+            f"📤 Экспорт игры {code}\n\n"
+            f"Скопируйте и в следующем году используйте:\n"
+            f"`/import_previous {export_text}`\n\n"
+            f"Или просто:\n{export_text}"
+        )
+        await query.edit_message_text(reply, parse_mode="Markdown")
+        return
 
 
 async def myresult(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -623,7 +655,6 @@ async def export_draw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     for giver_id, receiver_id in game["assignments"].items():
         g_key = get_user_key(giver_id, parts)
         r_key = get_user_key(receiver_id, parts)
-        # если ключ id: — пропускаем или оставляем как есть
         if g_key.startswith("id:") or r_key.startswith("id:"):
             continue
         lines.append(f"@{g_key}:@{r_key}")
