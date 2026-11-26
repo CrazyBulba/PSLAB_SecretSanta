@@ -1,12 +1,13 @@
 """
-Secret Santa Telegram Bot — v1.9.1
-Закрытые игры удаляются и не показываются.
+Secret Santa Telegram Bot — v1.10.0
+Формат сообщения об игре в /mygames.
 """
 
 import json
 import logging
 import os
 import random
+import re
 import time
 import uuid
 from pathlib import Path
@@ -39,13 +40,14 @@ class GameManager:
             raw = json.loads(DATA_FILE.read_text(encoding="utf-8"))
             for code, g in raw.items():
                 if g.get("closed"):
-                    continue  # не загружаем уже закрытые
+                    continue
                 g["participants"] = {int(k): v for k, v in g.get("participants", {}).items()}
                 if "assignments" in g:
                     g["assignments"] = {int(k): int(v) for k, v in g["assignments"].items()}
                 g["forbidden_pairs"] = {tuple(p) for p in g.get("forbidden_pairs", [])}
                 g.setdefault("avoid_previous", False)
                 g.setdefault("intro", "")
+                g.setdefault("gift_amount", "")
                 self.games[code] = g
             logger.info(f"Загружено {len(self.games)} игр")
         except Exception as e:
@@ -82,7 +84,7 @@ class GameManager:
                 res.append((code, g))
         return res
 
-    def create(self, user, intro: str = "") -> str:
+    def create(self, user, intro: str = "", gift_amount: str = "") -> str:
         code = uuid.uuid4().hex[:6].upper()
         self.games[code] = {
             "organizer": user.id,
@@ -99,6 +101,7 @@ class GameManager:
             "avoid_previous": False,
             "forbidden_pairs": set(),
             "intro": intro,
+            "gift_amount": gift_amount,
         }
         self.save()
         return code
@@ -128,6 +131,14 @@ def get_key(uid: int, parts: dict) -> str:
     info = parts.get(uid, {})
     u = info.get("username")
     return u.lower().lstrip("@") if u else f"id:{uid}"
+
+
+def extract_amount(text: str) -> str:
+    """Пытается вытащить сумму из текста (напр. 3000 рублей, 50$, 2000₽)."""
+    if not text:
+        return ""
+    m = re.search(r"(\d+[\s]?[рублей₽$]|до\s*\d+|\d+\s*р\.?)", text, re.IGNORECASE)
+    return m.group(0).strip() if m else ""
 
 
 def derangement(items: list, forbidden: Optional[Set[Tuple[str, str]]] = None, parts: dict = None) -> dict:
@@ -227,6 +238,7 @@ PROMPTS = {
     "intro": "📝 Напишите вступительный текст (около 200 слов).\nНе забудьте указать сумму подарка и сроки.",
     "wish": "🎁 Напишите ваши пожелания к подарку.",
     "import_pairs": "🔗 Отправьте пары в формате:\n@user1:@user2 @user3:@user4",
+    "amount": "💰 Укажите сумму на подарок (например: 3000 рублей или 50$)",
 }
 
 
@@ -245,6 +257,10 @@ async def handle_awaiting(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if kind == "intro" and code and code in manager.games:
         manager.games[code]["intro"] = text
+        # автоизвлечение суммы
+        amount = extract_amount(text)
+        if amount and not manager.games[code].get("gift_amount"):
+            manager.games[code]["gift_amount"] = amount
         manager.save()
         await update.message.reply_text(f"✅ Вступительное для игры {code} сохранено!")
         return True
@@ -272,14 +288,83 @@ async def handle_awaiting(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if kind == "create_intro":
         intro = "" if text.lower() in ("пропустить", "skip", "-", "нет") else text
-        new_code = manager.create(update.effective_user, intro)
+        amount = extract_amount(intro) if intro else ""
+        new_code = manager.create(update.effective_user, intro, amount)
         msg = f"✅ Игра создана!\nGameID: {new_code}\n\n/join {new_code}"
         if intro:
             msg += "\n\n📝 Вступительное сохранено."
+        if amount:
+            msg += f"\n💰 Сумма: {amount}"
         await update.message.reply_text(msg)
         return True
 
+    if kind == "amount" and code and code in manager.games:
+        manager.games[code]["gift_amount"] = text
+        manager.save()
+        await update.message.reply_text(f"✅ Сумма для {code}: {text}")
+        return True
+
     return False
+
+
+def build_game_info(code: str, game: dict, user_id: int) -> str:
+    """Формирует красивое сообщение об игре."""
+    parts = game["participants"]
+    is_org = game.get("organizer") == user_id
+    my_info = parts.get(user_id, {})
+
+    lines = []
+
+    # Вступительное
+    intro = game.get("intro", "").strip()
+    if intro:
+        lines.append(f"📝 {intro}")
+    else:
+        lines.append("📝 Вступительное не задано")
+
+    # Сумма
+    amount = game.get("gift_amount") or extract_amount(intro)
+    lines.append(f"💰 Сумма на подарок: {amount or '—'}")
+
+    lines.append(f"🆔 ID: {code}")
+    lines.append("")
+
+    # Участник
+    lines.append("── Участник ──")
+    assignments = game.get("assignments", {})
+    if user_id in assignments:
+        rec_id = assignments[user_id]
+        rec = parts.get(rec_id, {})
+        rec_name = rec.get("name", "?")
+        rec_un = f" @{rec['username']}" if rec.get("username") else ""
+        lines.append(f"🎁 Подопечный: {rec_name}{rec_un}")
+        wish = rec.get("wishlist", "").strip()
+        if wish:
+            lines.append(f"💬 Подопечный желает: {wish}")
+    else:
+        lines.append("🎁 Подопечный: —")
+
+    my_wish = my_info.get("wishlist", "").strip()
+    lines.append(f"✨ Мое желание: {my_wish or '—'}")
+    lines.append(f"👥 Участников: {len(parts)}")
+
+    # Организатор
+    if is_org:
+        lines.append("")
+        lines.append("── Организатор ──")
+        drawn = "да" if assignments else "нет"
+        lines.append(f"🎲 Розыгрыш: {drawn}")
+        avoid = game.get("avoid_previous", False)
+        forbidden = game.get("forbidden_pairs", set())
+        status = "вкл" if avoid else "выкл"
+        lines.append(f"🛡 Избегать: {status} ({len(forbidden)} пар)")
+        if avoid and forbidden:
+            pairs = [f"@{a}→@{b}" for a, b in list(forbidden)[:10]]
+            lines.append("   " + ", ".join(pairs))
+            if len(forbidden) > 10:
+                lines.append(f"   ... и ещё {len(forbidden)-10}")
+
+    return "\n".join(lines)
 
 
 # ─── Commands ───
@@ -289,19 +374,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await check_pending(update, context)
     await update.message.reply_text(
         "🎅 Secret Santa Bot\n\n"
-        "/create — создать игру (бот спросит вступительное)\n"
-        "/setintro — задать вступительное\n"
+        "/create — создать игру\n"
+        "/setintro — вступительное\n"
+        "/setamount — сумма на подарок\n"
         "/join CODE — вступить\n"
         "/mygames — мои игры\n"
         "/setwish — пожелания\n"
         "/participants — участники\n"
         "/draw — розыгрыш\n"
         "/export — экспорт пар\n"
-        "/close [all] — закрыть (удалить)\n"
+        "/close [all] — закрыть\n"
         "/avoid on|off\n"
-        "/import_previous — загрузить пары\n"
+        "/import_previous\n"
         "/import_from OLDCODE\n"
-        "/myresult — мой результат\n"
+        "/myresult\n"
         "/info"
     )
 
@@ -309,12 +395,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_create(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args:
         intro = " ".join(context.args)
-        code = manager.create(update.effective_user, intro)
-        await update.message.reply_text(f"✅ Игра создана!\nGameID: {code}\n\n/join {code}\n\n📝 Вступительное сохранено.")
+        amount = extract_amount(intro)
+        code = manager.create(update.effective_user, intro, amount)
+        msg = f"✅ Игра создана!\nGameID: {code}\n\n/join {code}"
+        if intro:
+            msg += "\n\n📝 Вступительное сохранено."
+        await update.message.reply_text(msg)
         return
     context.user_data["awaiting"] = {"type": "create_intro"}
     await update.message.reply_text(
-        "🎄 Создаём игру.\n\n" + PROMPTS["intro"] + "\n\nИли отправьте «пропустить», если без вступительного."
+        "🎄 Создаём игру.\n\n" + PROMPTS["intro"] + "\n\nИли отправьте «пропустить»."
     )
 
 
@@ -326,11 +416,29 @@ async def cmd_setintro(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args and not (context.args[0].upper() == code and len(context.args) == 1):
         text = " ".join(context.args[1:] if context.args[0].upper() == code else context.args)
         game["intro"] = text
+        amount = extract_amount(text)
+        if amount:
+            game["gift_amount"] = amount
         manager.save()
         await update.message.reply_text(f"✅ Вступительное для {code} сохранено.")
         return
     context.user_data["awaiting"] = {"type": "intro", "code": code}
     await update.message.reply_text(PROMPTS["intro"])
+
+
+async def cmd_setamount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    res = await select_game(update, context, organizer=True, action="setamount")
+    if not res:
+        return
+    code, game = res
+    if context.args and not (context.args[0].upper() == code and len(context.args) == 1):
+        text = " ".join(context.args[1:] if context.args[0].upper() == code else context.args)
+        game["gift_amount"] = text
+        manager.save()
+        await update.message.reply_text(f"✅ Сумма для {code}: {text}")
+        return
+    context.user_data["awaiting"] = {"type": "amount", "code": code}
+    await update.message.reply_text(PROMPTS["amount"])
 
 
 async def cmd_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -558,24 +666,14 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     game = manager.games[code]
 
     if action == "info":
-        role = "орг" if game.get("organizer") == uid else "уч"
-        status = "активна"
-        drawn = "да" if game.get("assignments") else "нет"
-        avoid = "вкл" if game.get("avoid_previous") else "выкл"
-        intro = "да" if game.get("intro") else "нет"
-        text = (
-            f"{code}\nСтатус: {status}\nРоль: {role}\n"
-            f"Участников: {len(game['participants'])}\n"
-            f"Розыгрыш: {drawn}\nИзбегать: {avoid} ({len(game.get('forbidden_pairs', set()))})\n"
-            f"Вступительное: {intro}"
-        )
+        text = build_game_info(code, game, uid)
         buttons = []
         if game.get("organizer") == uid:
             buttons.append([
                 InlineKeyboardButton("🎲 Розыгрыш", callback_data=f"draw:{code}"),
                 InlineKeyboardButton("👥 Уч", callback_data=f"participants:{code}"),
             ])
-            buttons.append([InlineKeyboardButton("🔒 Закрыть (удалить)", callback_data=f"close:{code}")])
+            buttons.append([InlineKeyboardButton("🔒 Закрыть", callback_data=f"close:{code}")])
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons) if buttons else None)
         return
 
@@ -624,6 +722,11 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(PROMPTS["intro"])
         return
 
+    if action == "setamount":
+        context.user_data["awaiting"] = {"type": "amount", "code": code}
+        await query.edit_message_text(PROMPTS["amount"])
+        return
+
     if action == "export":
         if game.get("organizer") != uid or not game.get("assignments"):
             await query.edit_message_text("Недоступно")
@@ -653,13 +756,14 @@ async def setup(app: Application):
         BotCommand("start", "Помощь"),
         BotCommand("create", "Создать игру"),
         BotCommand("setintro", "Вступительное"),
+        BotCommand("setamount", "Сумма на подарок"),
         BotCommand("join", "Вступить"),
         BotCommand("mygames", "Мои игры"),
         BotCommand("setwish", "Пожелания"),
         BotCommand("participants", "Участники"),
         BotCommand("draw", "Розыгрыш"),
         BotCommand("export", "Экспорт"),
-        BotCommand("close", "Закрыть (удалить)"),
+        BotCommand("close", "Закрыть"),
         BotCommand("avoid", "Избегать прошлые"),
         BotCommand("import_previous", "Загрузить пары"),
         BotCommand("import_from", "Импорт из игры"),
@@ -679,6 +783,7 @@ def main():
         CommandHandler("help", start),
         CommandHandler("create", cmd_create),
         CommandHandler("setintro", cmd_setintro),
+        CommandHandler("setamount", cmd_setamount),
         CommandHandler("join", cmd_join),
         CommandHandler("mygames", cmd_mygames),
         CommandHandler("setwish", cmd_setwish),
