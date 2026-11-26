@@ -1,6 +1,6 @@
 """
-Secret Santa Telegram Bot — рефакторинг v1.8.0
-Чистая архитектура: GameManager + единый выбор игры + тонкие команды.
+Secret Santa Telegram Bot — v1.9.0
+Конверсационные команды: вопрос → ответ следующим сообщением.
 """
 
 import json
@@ -10,7 +10,7 @@ import random
 import time
 import uuid
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple, Set, Callable
+from typing import Dict, Any, List, Optional, Tuple, Set
 
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
@@ -139,7 +139,6 @@ def derangement(items: list, forbidden: Optional[Set[Tuple[str, str]]] = None, p
             ass = dict(zip(items, rec))
             if valid(ass):
                 return ass
-    # fallback
     rec = items[:]
     while True:
         random.shuffle(rec)
@@ -155,7 +154,6 @@ async def select_game(
     action: str = "info",
     include_all: bool = False,
 ) -> Optional[Tuple[str, Dict]]:
-    """Возвращает (code, game) или None и показывает клавиатуру."""
     user_id = update.effective_user.id
     args = context.args or []
     code = args[0].upper() if args and args[0].upper() in manager.games else None
@@ -216,23 +214,83 @@ async def check_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Результат отправлен!")
 
 
+# ─── Conversational state ───
+
+PROMPTS = {
+    "intro": "📝 Напишите вступительный текст (около 200 слов).\nНе забудьте указать сумму подарка и сроки.",
+    "wish": "🎁 Напишите ваши пожелания к подарку.",
+    "import_pairs": "🔗 Отправьте пары в формате:\n@user1:@user2 @user3:@user4",
+}
+
+
+async def handle_awaiting(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Обрабатывает ответ на вопрос бота. Возвращает True если обработал."""
+    awaiting = context.user_data.get("awaiting")
+    if not awaiting or not update.message or not update.message.text:
+        return False
+
+    text = update.message.text.strip()
+    if not text or text.startswith("/"):
+        return False
+
+    kind = awaiting.get("type")
+    code = awaiting.get("code")
+    context.user_data.pop("awaiting", None)
+
+    if kind == "intro" and code and code in manager.games:
+        manager.games[code]["intro"] = text
+        manager.save()
+        await update.message.reply_text(f"✅ Вступительное для игры {code} сохранено!")
+        return True
+
+    if kind == "wish" and code and code in manager.games:
+        uid = update.effective_user.id
+        if uid in manager.games[code]["participants"]:
+            manager.games[code]["participants"][uid]["wishlist"] = text
+            manager.save()
+            await update.message.reply_text(f"✅ Пожелания для игры {code} сохранены!")
+            return True
+
+    if kind == "import_pairs" and code and code in manager.games:
+        added = 0
+        for p in text.split():
+            if ":" in p:
+                a, b = p.split(":", 1)
+                a, b = a.lower().lstrip("@"), b.lower().lstrip("@")
+                if a and b:
+                    manager.games[code].setdefault("forbidden_pairs", set()).add((a, b))
+                    added += 1
+        manager.save()
+        await update.message.reply_text(f"✅ Добавлено {added} пар.")
+        return True
+
+    if kind == "create_intro":
+        # создаём игру с intro
+        code = manager.create(update.effective_user, text)
+        await update.message.reply_text(f"✅ Игра создана!\nGameID: {code}\n\n/join {code}\n\n📝 Вступительное сохранено.")
+        return True
+
+    return False
+
+
 # ─── Commands ───
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop("awaiting", None)
     await check_pending(update, context)
     await update.message.reply_text(
         "🎅 Secret Santa Bot\n\n"
-        "/create [текст] — создать игру\n"
-        "/setintro [текст] — вступительное\n"
+        "/create — создать игру (бот спросит вступительное)\n"
+        "/setintro — задать вступительное\n"
         "/join CODE — вступить\n"
         "/mygames — мои игры\n"
-        "/setwish [текст] — пожелания\n"
+        "/setwish — пожелания\n"
         "/participants — участники\n"
         "/draw — розыгрыш\n"
         "/export — экспорт пар\n"
         "/close [all] — закрыть\n"
-        "/avoid on|off — избегать прошлые\n"
-        "/import_previous @a:@b ...\n"
+        "/avoid on|off\n"
+        "/import_previous — загрузить пары\n"
         "/import_from OLDCODE\n"
         "/myresult — мой результат\n"
         "/info"
@@ -240,30 +298,32 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_create(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    intro = " ".join(context.args) if context.args else ""
-    code = manager.create(update.effective_user, intro)
-    msg = f"✅ Игра создана!\nGameID: {code}\n\n/join {code}"
-    if intro:
-        msg += "\n\n📝 Вступительное сохранено."
-    await update.message.reply_text(msg)
+    if context.args:
+        intro = " ".join(context.args)
+        code = manager.create(update.effective_user, intro)
+        await update.message.reply_text(f"✅ Игра создана!\nGameID: {code}\n\n/join {code}\n\n📝 Вступительное сохранено.")
+        return
+    # Спрашиваем вступительное
+    context.user_data["awaiting"] = {"type": "create_intro"}
+    await update.message.reply_text(
+        "🎄 Создаём игру.\n\n" + PROMPTS["intro"] + "\n\nИли отправьте «пропустить», если без вступительного."
+    )
 
 
 async def cmd_setintro(update: Update, context: ContextTypes.DEFAULT_TYPE):
     res = await select_game(update, context, organizer=True, action="setintro_select")
     if not res:
-        if context.args:
-            context.user_data["pending_intro"] = " ".join(context.args)
         return
     code, game = res
-    text = " ".join(context.args[1:] if context.args and context.args[0].upper() == code else context.args)
-    if not text and "pending_intro" in context.user_data:
-        text = context.user_data.pop("pending_intro")
-    if not text:
-        await update.message.reply_text("Укажите текст.")
+    if context.args and not (context.args[0].upper() == code and len(context.args) == 1):
+        text = " ".join(context.args[1:] if context.args[0].upper() == code else context.args)
+        game["intro"] = text
+        manager.save()
+        await update.message.reply_text(f"✅ Вступительное для {code} сохранено.")
         return
-    game["intro"] = text
-    manager.save()
-    await update.message.reply_text(f"✅ Вступительное для {code} сохранено.")
+    # Спрашиваем
+    context.user_data["awaiting"] = {"type": "intro", "code": code}
+    await update.message.reply_text(PROMPTS["intro"])
 
 
 async def cmd_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -295,23 +355,18 @@ async def cmd_mygames(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_setwish(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("/setwish [текст]")
-        return
     res = await select_game(update, context, organizer=False, action="setwish_select")
     if not res:
-        context.user_data["pending_wish"] = " ".join(context.args)
         return
     code, game = res
-    text = " ".join(context.args[1:] if context.args and context.args[0].upper() == code else context.args)
-    if not text and "pending_wish" in context.user_data:
-        text = context.user_data.pop("pending_wish")
-    if not text:
-        await update.message.reply_text("Укажите текст.")
+    if context.args and not (context.args[0].upper() == code and len(context.args) == 1):
+        text = " ".join(context.args[1:] if context.args[0].upper() == code else context.args)
+        game["participants"][update.effective_user.id]["wishlist"] = text
+        manager.save()
+        await update.message.reply_text(f"✅ Пожелания для {code} сохранены.")
         return
-    game["participants"][update.effective_user.id]["wishlist"] = text
-    manager.save()
-    await update.message.reply_text(f"✅ Пожелания для {code} сохранены.")
+    context.user_data["awaiting"] = {"type": "wish", "code": code}
+    await update.message.reply_text(PROMPTS["wish"])
 
 
 async def cmd_participants(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -340,7 +395,6 @@ async def cmd_draw(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for uid in parts:
         game["participants"][uid]["notified"] = False
     manager.save()
-
     ok = 0
     for uid in parts:
         if await send_result(context.bot, uid, code, game):
@@ -405,24 +459,25 @@ async def cmd_avoid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_import_previous(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("/import_previous @a:@b @c:@d")
-        return
     res = await select_game(update, context, organizer=True, action="import_prev")
     if not res:
         return
     code, game = res
-    pairs = context.args[1:] if context.args and context.args[0].upper() == code else context.args
-    added = 0
-    for p in pairs:
-        if ":" in p:
-            a, b = p.split(":", 1)
-            a, b = a.lower().lstrip("@"), b.lower().lstrip("@")
-            if a and b:
-                game.setdefault("forbidden_pairs", set()).add((a, b))
-                added += 1
-    manager.save()
-    await update.message.reply_text(f"✅ Добавлено {added} пар (всего {len(game.get('forbidden_pairs', set()))})")
+    if context.args and not (context.args[0].upper() == code and len(context.args) == 1):
+        pairs = context.args[1:] if context.args[0].upper() == code else context.args
+        added = 0
+        for p in pairs:
+            if ":" in p:
+                a, b = p.split(":", 1)
+                a, b = a.lower().lstrip("@"), b.lower().lstrip("@")
+                if a and b:
+                    game.setdefault("forbidden_pairs", set()).add((a, b))
+                    added += 1
+        manager.save()
+        await update.message.reply_text(f"✅ Добавлено {added} пар.")
+        return
+    context.user_data["awaiting"] = {"type": "import_pairs", "code": code}
+    await update.message.reply_text(PROMPTS["import_pairs"])
 
 
 async def cmd_import_from(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -549,19 +604,19 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("Только орг")
             return
         lines = [f"{code} ({len(game['participants'])}):"]
-        for uid_, info in game["participants"].items():
+        for _, info in game["participants"].items():
             lines.append(f"• {info['name']} — {info['wishlist'] or '—'}")
         await query.edit_message_text("\n".join(lines))
         return
 
     if action == "setwish_select":
-        wish = context.user_data.pop("pending_wish", None)
-        if not wish or uid not in game["participants"]:
-            await query.edit_message_text("Ошибка")
-            return
-        game["participants"][uid]["wishlist"] = wish
-        manager.save()
-        await query.edit_message_text(f"✅ Пожелания для {code} сохранены")
+        context.user_data["awaiting"] = {"type": "wish", "code": code}
+        await query.edit_message_text(PROMPTS["wish"])
+        return
+
+    if action == "setintro_select":
+        context.user_data["awaiting"] = {"type": "intro", "code": code}
+        await query.edit_message_text(PROMPTS["intro"])
         return
 
     if action == "export":
@@ -580,6 +635,13 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await query.edit_message_text("Нет пар с username")
         return
+
+
+async def private_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает обычные сообщения: сначала ответы на вопросы, потом pending results."""
+    if await handle_awaiting(update, context):
+        return
+    await check_pending(update, context)
 
 
 async def setup(app: Application):
@@ -626,7 +688,7 @@ def main():
         CommandHandler("myresult", cmd_myresult),
         CommandHandler("info", cmd_info),
         CallbackQueryHandler(callback),
-        MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, check_pending),
+        MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, private_message),
     ]
     for h in handlers:
         app.add_handler(h)
