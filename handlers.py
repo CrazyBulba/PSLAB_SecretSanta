@@ -121,7 +121,7 @@ async def handle_awaiting(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             manager.games[code]["participants"][uid]["wishlist"] = text
             manager.save()
             await update.message.reply_text(f"✅ Пожелания для игры {code} сохранены!")
-            return True
+        return True
 
     if kind == "import_pairs" and code and code in manager.games:
         added = 0
@@ -256,27 +256,6 @@ async def cmd_draw(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg)
 
 
-async def cmd_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    res = await select_game(update, context, organizer=True, active=True, action="export")
-    if not res:
-        return
-    code, game = res
-    if not game.get("assignments"):
-        await update.message.reply_text("Нет розыгрыша")
-        return
-    lines = []
-    for g_id, r_id in game["assignments"].items():
-        gk = get_key(g_id, game["participants"])
-        rk = get_key(r_id, game["participants"])
-        if not gk.startswith("id:") and not rk.startswith("id:"):
-            lines.append(f"@{gk}:@{rk}")
-    if not lines:
-        await update.message.reply_text("Нет пар с username")
-        return
-    text = " ".join(lines)
-    await update.message.reply_text(f"📤 Экспорт {code}\n\n`/import_previous {text}`\n\n{text}", parse_mode="Markdown")
-
-
 async def cmd_close(update: Update, context: ContextTypes.DEFAULT_TYPE):
     arg = (context.args or [""])[0].upper()
     if arg in ("ALL", "ВСЕ"):
@@ -292,28 +271,6 @@ async def cmd_close(update: Update, context: ContextTypes.DEFAULT_TYPE):
     code, game = res
     manager.delete(code)
     await update.message.reply_text(f"✅ Игра {code} удалена")
-
-
-async def cmd_import_previous(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    res = await select_game(update, context, organizer=True, action="import_prev")
-    if not res:
-        return
-    code, game = res
-    if context.args and not (context.args[0].upper() == code and len(context.args) == 1):
-        pairs = context.args[1:] if context.args[0].upper() == code else context.args
-        added = 0
-        for p in pairs:
-            if ":" in p:
-                a, b = p.split(":", 1)
-                a, b = a.lower().lstrip("@"), b.lower().lstrip("@")
-                if a and b:
-                    game.setdefault("forbidden_pairs", set()).add((a, b))
-                    added += 1
-        manager.save()
-        await update.message.reply_text(f"✅ Добавлено {added} пар.")
-        return
-    context.user_data["awaiting"] = {"type": "import_pairs", "code": code}
-    await update.message.reply_text(PROMPTS["import_pairs"])
 
 
 async def cmd_myresult(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -420,6 +377,31 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if action == "export":
+        if game.get("organizer") != uid or not game.get("assignments"):
+            await query.edit_message_text("Нет розыгрыша или нет прав")
+            return
+        lines = []
+        for g_id, r_id in game["assignments"].items():
+            gk = get_key(g_id, game["participants"])
+            rk = get_key(r_id, game["participants"])
+            if not gk.startswith("id:") and not rk.startswith("id:"):
+                lines.append(f"@{gk}:@{rk}")
+        if lines:
+            text = " ".join(lines)
+            await query.edit_message_text(f"📤 Экспорт {code}\n\n{text}", parse_mode="Markdown")
+        else:
+            await query.edit_message_text("Нет пар с username")
+        return
+
+    if action == "import_prev":
+        if game.get("organizer") != uid:
+            await query.edit_message_text("Нет прав")
+            return
+        context.user_data["awaiting"] = {"type": "import_pairs", "code": code}
+        await query.edit_message_text(PROMPTS["import_pairs"])
+        return
+
     if action == "draw":
         if game.get("organizer") != uid:
             await query.edit_message_text("Нет прав")
@@ -470,23 +452,6 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(PROMPTS["amount"])
         return
 
-    if action == "export":
-        if game.get("organizer") != uid or not game.get("assignments"):
-            await query.edit_message_text("Недоступно")
-            return
-        lines = []
-        for g_id, r_id in game["assignments"].items():
-            gk = get_key(g_id, game["participants"])
-            rk = get_key(r_id, game["participants"])
-            if not gk.startswith("id:") and not rk.startswith("id:"):
-                lines.append(f"@{gk}:@{rk}")
-        if lines:
-            text = " ".join(lines)
-            await query.edit_message_text(f"📤 {code}\n\n`/import_previous {text}`\n\n{text}", parse_mode="Markdown")
-        else:
-            await query.edit_message_text("Нет пар с username")
-        return
-
 
 async def private_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await handle_awaiting(update, context):
@@ -504,9 +469,7 @@ async def setup(app):
         BotCommand("setwish", "Пожелания"),
         BotCommand("participants", "Участники"),
         BotCommand("draw", "Розыгрыш"),
-        BotCommand("export", "Экспорт"),
         BotCommand("close", "Удалить игру"),
-        BotCommand("import_previous", "Загрузить прошлые пары"),
         BotCommand("myresult", "Мой результат"),
         BotCommand("info", "Инфо"),
     ]
