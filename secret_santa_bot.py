@@ -1,7 +1,6 @@
 """
-Бот для Тайного Санты (Secret Santa) в Telegram.
-Поддержка нескольких игр, инлайн-меню, повторного розыгрыша,
-сохранения состояния, избегания повторений и вступительного сообщения.
+Secret Santa Telegram Bot — рефакторинг v1.8.0
+Чистая архитектура: GameManager + единый выбор игры + тонкие команды.
 """
 
 import json
@@ -11,958 +10,629 @@ import random
 import time
 import uuid
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple, Set
+from typing import Dict, Any, List, Optional, Tuple, Set, Callable
 
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-    MessageHandler,
-    filters,
-)
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
-
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data" if Path("/data").exists() else "."))
 DATA_FILE = DATA_DIR / "games.json"
-
-VERSION_FILE = Path("VERSION")
-def get_version() -> str:
-    try:
-        if VERSION_FILE.exists():
-            return VERSION_FILE.read_text(encoding="utf-8").strip()
-    except Exception:
-        pass
-    return "unknown"
-
-BOT_VERSION = get_version()
+VERSION = Path("VERSION").read_text(encoding="utf-8").strip() if Path("VERSION").exists() else "unknown"
 START_TIME = time.time()
 
-games: Dict[str, Dict[str, Any]] = {}
-
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-)
+logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def get_user_key(user_id: int, participants: dict) -> str:
-    info = participants.get(user_id, {})
-    username = info.get("username")
-    if username:
-        return username.lower().lstrip("@")
-    return f"id:{user_id}"
+class GameManager:
+    def __init__(self):
+        self.games: Dict[str, Dict[str, Any]] = {}
+        self.load()
 
-
-def load_games() -> None:
-    global games
-    if DATA_FILE.exists():
+    def load(self):
+        if not DATA_FILE.exists():
+            return
         try:
-            with open(DATA_FILE, "r", encoding="utf-8") as f:
-                raw = json.load(f)
-            games = {}
-            for code, game in raw.items():
-                game["participants"] = {
-                    int(uid): info for uid, info in game.get("participants", {}).items()
-                }
-                if "assignments" in game:
-                    game["assignments"] = {
-                        int(k): int(v) for k, v in game["assignments"].items()
-                    }
-                if "forbidden_pairs" in game:
-                    game["forbidden_pairs"] = {
-                        (p[0], p[1]) for p in game["forbidden_pairs"]
-                    }
-                else:
-                    game["forbidden_pairs"] = set()
-                game.setdefault("avoid_previous", False)
-                game.setdefault("intro", "")
-                games[code] = game
-            logger.info(f"Загружено игр: {len(games)}")
+            raw = json.loads(DATA_FILE.read_text(encoding="utf-8"))
+            for code, g in raw.items():
+                g["participants"] = {int(k): v for k, v in g.get("participants", {}).items()}
+                if "assignments" in g:
+                    g["assignments"] = {int(k): int(v) for k, v in g["assignments"].items()}
+                g["forbidden_pairs"] = {tuple(p) for p in g.get("forbidden_pairs", [])}
+                g.setdefault("avoid_previous", False)
+                g.setdefault("intro", "")
+                self.games[code] = g
+            logger.info(f"Загружено {len(self.games)} игр")
         except Exception as e:
-            logger.error(f"Ошибка загрузки игр: {e}")
-            games = {}
-    else:
-        logger.info("Файл с играми не найден, начинаем с пустого хранилища")
-        games = {}
+            logger.error(f"Load error: {e}")
+
+    def save(self):
+        try:
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            out = {}
+            for code, g in self.games.items():
+                d = dict(g)
+                d["participants"] = {str(k): v for k, v in g["participants"].items()}
+                if "assignments" in g:
+                    d["assignments"] = {str(k): v for k, v in g["assignments"].items()}
+                d["forbidden_pairs"] = [list(p) for p in g.get("forbidden_pairs", set())]
+                out[code] = d
+            DATA_FILE.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as e:
+            logger.error(f"Save error: {e}")
+
+    def user_games(self, user_id: int, organizer: bool = False, active_only: bool = False) -> List[Tuple[str, Dict]]:
+        res = []
+        for code, g in self.games.items():
+            if active_only and g.get("closed"):
+                continue
+            if organizer and g.get("organizer") == user_id:
+                res.append((code, g))
+            elif not organizer and user_id in g.get("participants", {}):
+                res.append((code, g))
+        return res
+
+    def create(self, user, intro: str = "") -> str:
+        code = uuid.uuid4().hex[:6].upper()
+        self.games[code] = {
+            "organizer": user.id,
+            "participants": {
+                user.id: {
+                    "name": user.full_name or user.username or "Участник",
+                    "wishlist": "",
+                    "username": user.username,
+                    "notified": False,
+                }
+            },
+            "closed": False,
+            "assignments": {},
+            "avoid_previous": False,
+            "forbidden_pairs": set(),
+            "intro": intro,
+        }
+        self.save()
+        return code
+
+    def join(self, code: str, user) -> Optional[str]:
+        g = self.games.get(code)
+        if not g:
+            return "Игра не найдена"
+        if g.get("closed"):
+            return "Игра закрыта"
+        if user.id in g["participants"]:
+            return "Вы уже в игре"
+        g["participants"][user.id] = {
+            "name": user.full_name or user.username or "Участник",
+            "wishlist": "",
+            "username": user.username,
+            "notified": False,
+        }
+        self.save()
+        return None
 
 
-def save_games() -> None:
-    try:
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        to_save = {}
-        for code, game in games.items():
-            g = dict(game)
-            g["participants"] = {str(uid): info for uid, info in game.get("participants", {}).items()}
-            if "assignments" in game:
-                g["assignments"] = {str(k): v for k, v in game["assignments"].items()}
-            if "forbidden_pairs" in g:
-                g["forbidden_pairs"] = [list(p) for p in g["forbidden_pairs"]]
-            to_save[code] = g
-        with open(DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump(to_save, f, ensure_ascii=False, indent=2)
-        logger.debug("Игры сохранены")
-    except Exception as e:
-        logger.error(f"Ошибка сохранения игр: {e}")
+manager = GameManager()
 
 
-def get_user_games(user_id: int, as_organizer: bool = False, only_active: bool = False) -> List[Tuple[str, Dict]]:
-    result = []
-    for code, game in games.items():
-        if only_active and game.get("closed"):
-            continue
-        if as_organizer:
-            if game.get("organizer") == user_id:
-                result.append((code, game))
-        else:
-            if user_id in game.get("participants", {}):
-                result.append((code, game))
-    return result
+def get_key(uid: int, parts: dict) -> str:
+    info = parts.get(uid, {})
+    u = info.get("username")
+    return u.lower().lstrip("@") if u else f"id:{uid}"
 
 
-def build_game_keyboard(user_games: List[Tuple[str, Dict]], action: str, include_all: bool = False) -> InlineKeyboardMarkup:
-    buttons = []
-    for code, game in user_games:
-        status = "❌" if game.get("closed") else "✅"
-        parts = len(game.get("participants", {}))
-        text = f"{status} {code} ({parts} чел.)"
-        buttons.append([InlineKeyboardButton(text, callback_data=f"{action}:{code}")])
-
-    if include_all and len(user_games) > 1:
-        buttons.append([InlineKeyboardButton("🔒 Закрыть все", callback_data=f"{action}:ALL")])
-
-    return InlineKeyboardMarkup(buttons)
-
-
-def make_derangement(items: list, forbidden: Optional[Set[Tuple[str, str]]] = None, participants: dict = None) -> dict:
+def derangement(items: list, forbidden: Optional[Set[Tuple[str, str]]] = None, parts: dict = None) -> dict:
     if len(items) < 2:
         return {}
 
-    def is_valid(assignment: dict) -> bool:
-        if not forbidden or not participants:
+    def valid(a: dict) -> bool:
+        if not forbidden or not parts:
             return True
-        for giver, receiver in assignment.items():
-            g_key = get_user_key(giver, participants)
-            r_key = get_user_key(receiver, participants)
-            if (g_key, r_key) in forbidden:
-                return False
-        return True
+        return all((get_key(g, parts), get_key(r, parts)) not in forbidden for g, r in a.items())
 
     for _ in range(500):
-        receivers = items[:]
-        random.shuffle(receivers)
-        if all(a != b for a, b in zip(items, receivers)):
-            assignment = dict(zip(items, receivers))
-            if is_valid(assignment):
-                return assignment
-
-    logger.warning("Не удалось найти derangement без запрещённых пар, используем обычную")
-    receivers = items[:]
+        rec = items[:]
+        random.shuffle(rec)
+        if all(a != b for a, b in zip(items, rec)):
+            ass = dict(zip(items, rec))
+            if valid(ass):
+                return ass
+    # fallback
+    rec = items[:]
     while True:
-        random.shuffle(receivers)
-        if all(a != b for a, b in zip(items, receivers)):
-            return dict(zip(items, receivers))
+        random.shuffle(rec)
+        if all(a != b for a, b in zip(items, rec)):
+            return dict(zip(items, rec))
 
 
-async def send_assignment(bot, user_id: int, code: str, game: dict) -> bool:
-    if user_id not in game["assignments"]:
+async def select_game(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    organizer: bool = False,
+    active: bool = True,
+    action: str = "info",
+    include_all: bool = False,
+) -> Optional[Tuple[str, Dict]]:
+    """Возвращает (code, game) или None и показывает клавиатуру."""
+    user_id = update.effective_user.id
+    args = context.args or []
+    code = args[0].upper() if args and args[0].upper() in manager.games else None
+
+    games = manager.user_games(user_id, organizer=organizer, active_only=active)
+    if not games:
+        await update.message.reply_text("Нет подходящих игр.")
+        return None
+
+    if code:
+        game = next((g for c, g in games if c == code), None)
+        if game:
+            return code, game
+        await update.message.reply_text("Игра не найдена.")
+        return None
+
+    if len(games) == 1:
+        return games[0]
+
+    buttons = [
+        [InlineKeyboardButton(f"{'❌' if g.get('closed') else '✅'} {c} ({len(g['participants'])} чел.)", callback_data=f"{action}:{c}")]
+        for c, g in games
+    ]
+    if include_all and len(games) > 1:
+        buttons.append([InlineKeyboardButton("🔒 Закрыть все", callback_data=f"{action}:ALL")])
+    await update.message.reply_text("Выберите игру:", reply_markup=InlineKeyboardMarkup(buttons))
+    return None
+
+
+async def send_result(bot, uid: int, code: str, game: dict) -> bool:
+    if uid not in game.get("assignments", {}):
         return False
-
-    receiver_id = game["assignments"][user_id]
-    receiver = game["participants"].get(receiver_id)
-    if not receiver:
+    rec_id = game["assignments"][uid]
+    rec = game["participants"].get(rec_id)
+    if not rec:
         return False
-
-    name = receiver["name"]
-    wish = receiver["wishlist"] or "Пожеланий нет"
-    username = f"@{receiver['username']}" if receiver.get("username") else ""
-
-    text = (
-        f"🎁 Тайный Санта!\n\n"
-        f"Вы дарите подарок: {name} {username}\n\n"
-        f"Пожелания:\n{wish}\n\n"
-        f"GameID: {code}"
-    )
-
+    uname = f"@{rec['username']}" if rec.get("username") else ""
+    text = f"🎁 Тайный Санта!\n\nВы дарите: {rec['name']} {uname}\n\nПожелания:\n{rec['wishlist'] or 'Нет'}\n\nGameID: {code}"
     try:
-        await bot.send_message(chat_id=user_id, text=text)
-        game["participants"][user_id]["notified"] = True
-        save_games()
-        logger.info(f"Результат отправлен пользователю {user_id} (игра {code})")
+        await bot.send_message(uid, text)
+        game["participants"][uid]["notified"] = True
+        manager.save()
         return True
-    except Exception as e:
-        logger.error(f"Не удалось отправить сообщение {user_id}: {e}")
-        game["participants"][user_id]["notified"] = False
-        save_games()
+    except Exception:
+        game["participants"][uid]["notified"] = False
+        manager.save()
         return False
 
 
-async def check_and_send_pending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    bot = context.bot
-    sent_any = False
-
-    for code, game in games.items():
-        if game.get("assignments") and user_id in game.get("participants", {}):
-            if not game["participants"][user_id].get("notified", False):
-                if await send_assignment(bot, user_id, code, game):
-                    sent_any = True
-
-    if sent_any and update.message:
-        await update.message.reply_text("✅ Я отправил тебе результат розыгрыша!")
+async def check_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    sent = False
+    for code, g in manager.games.items():
+        if g.get("assignments") and uid in g["participants"] and not g["participants"][uid].get("notified"):
+            if await send_result(context.bot, uid, code, g):
+                sent = True
+    if sent and update.message:
+        await update.message.reply_text("✅ Результат отправлен!")
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await check_and_send_pending(update, context)
+# ─── Commands ───
 
-    text = (
-        "🎅 Привет! Это бот для организации Тайного Санты.\n\n"
-        "Команды:\n"
-        "/create [текст] — создать игру (можно сразу с вступительным)\n"
-        "/setintro [GameID] текст — задать/изменить вступительное сообщение\n"
-        "/join GameID — присоединиться к игре\n"
-        "/mygames — список ваших игр\n"
-        "/setwish [GameID] текст — указать пожелания\n"
-        "/participants [GameID] — список участников\n"
-        "/draw [GameID] — розыгрыш (организатор)\n"
-        "/export [GameID] — экспорт текущей жеребьёвки\n"
-        "/close [GameID|all] — закрыть игру\n"
-        "/avoid [GameID] on|off — избегать прошлые пары\n"
-        "/import_previous [GameID] @user1:@user2 ... — загрузить прошлые пары\n"
-        "/import_from [GameID] OLD_GAMEID — импорт из другой игры\n"
-        "/myresult — получить свой результат\n"
-        "/info — информация о боте\n"
-        "/help — помощь"
-    )
-    await update.message.reply_text(text)
-
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await start(update, context)
-
-
-async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    uptime_sec = int(time.time() - START_TIME)
-    hours, rem = divmod(uptime_sec, 3600)
-    minutes, seconds = divmod(rem, 60)
-    uptime_str = f"{hours}ч {minutes}м {seconds}с"
-
-    active_games = sum(1 for g in games.values() if not g.get("closed"))
-    total_participants = sum(len(g.get("participants", {})) for g in games.values())
-
-    text = (
-        f"ℹ️ Информация о боте\n\n"
-        f"Версия: {BOT_VERSION}\n"
-        f"Время работы: {uptime_str}\n"
-        f"Активных игр: {active_games}\n"
-        f"Всего игр: {len(games)}\n"
-        f"Всего участников: {total_participants}\n\n"
-        f"Репозиторий: github.com/CrazyBulba/PSLAB_SecretSanta"
-    )
-    await update.message.reply_text(text)
-
-
-async def mygames(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    user_games = get_user_games(user_id)
-
-    if not user_games:
-        await update.message.reply_text("Вы не участвуете ни в одной игре.\nСоздайте новую: /create")
-        return
-
-    keyboard = build_game_keyboard(user_games, "info")
-    await update.message.reply_text("Ваши игры. Выберите для подробностей:", reply_markup=keyboard)
-
-
-async def show_game_info(code: str, game: dict, user_id: int) -> str:
-    role = "организатор" if game.get("organizer") == user_id else "участник"
-    status = "закрыта" if game.get("closed") else "активна"
-    parts = len(game.get("participants", {}))
-    drawn = "Да" if game.get("assignments") else "Нет"
-    avoid = "вкл" if game.get("avoid_previous") else "выкл"
-    forbidden_count = len(game.get("forbidden_pairs", set()))
-    has_intro = "да" if game.get("intro") else "нет"
-    return (
-        f"GameID: {code}\n"
-        f"Статус: {status}\n"
-        f"Ваша роль: {role}\n"
-        f"Участников: {parts}\n"
-        f"Розыгрыш был: {drawn}\n"
-        f"Избегать прошлые: {avoid} ({forbidden_count} пар)\n"
-        f"Вступительное: {has_intro}"
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await check_pending(update, context)
+    await update.message.reply_text(
+        "🎅 Secret Santa Bot\n\n"
+        "/create [текст] — создать игру\n"
+        "/setintro [текст] — вступительное\n"
+        "/join CODE — вступить\n"
+        "/mygames — мои игры\n"
+        "/setwish [текст] — пожелания\n"
+        "/participants — участники\n"
+        "/draw — розыгрыш\n"
+        "/export — экспорт пар\n"
+        "/close [all] — закрыть\n"
+        "/avoid on|off — избегать прошлые\n"
+        "/import_previous @a:@b ...\n"
+        "/import_from OLDCODE\n"
+        "/myresult — мой результат\n"
+        "/info"
     )
 
 
-async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
-
-    data = query.data
-    if ":" not in data:
-        return
-
-    action, code = data.split(":", 1)
-    user_id = query.from_user.id
-
-    if action == "close" and code == "ALL":
-        user_games = get_user_games(user_id, as_organizer=True, only_active=True)
-        if not user_games:
-            await query.edit_message_text("Нет активных игр для закрытия.")
-            return
-        closed_count = 0
-        for c, g in user_games:
-            g["closed"] = True
-            closed_count += 1
-        save_games()
-        await query.edit_message_text(f"✅ Закрыто игр: {closed_count}")
-        return
-
-    if code not in games:
-        await query.edit_message_text("❌ Игра больше не существует.")
-        return
-
-    game = games[code]
-
-    if action == "info":
-        text = await show_game_info(code, game, user_id)
-        buttons = []
-        if game.get("organizer") == user_id and not game.get("closed"):
-            buttons.append([
-                InlineKeyboardButton("🎲 Розыгрыш", callback_data=f"draw:{code}"),
-                InlineKeyboardButton("👥 Участники", callback_data=f"participants:{code}"),
-            ])
-            buttons.append([InlineKeyboardButton("🔒 Закрыть игру", callback_data=f"close:{code}")])
-        if buttons:
-            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons))
-        else:
-            await query.edit_message_text(text)
-        return
-
-    if action == "setwish_select":
-        wish = context.user_data.get("pending_wish")
-        if not wish:
-            await query.edit_message_text("❌ Нет сохранённых пожеланий. Попробуйте снова /setwish")
-            return
-        if user_id not in game.get("participants", {}):
-            await query.edit_message_text("❌ Вы не участник этой игры.")
-            return
-        game["participants"][user_id]["wishlist"] = wish
-        save_games()
-        context.user_data.pop("pending_wish", None)
-        await query.edit_message_text(f"✅ Пожелания сохранены для игры {code}!")
-        return
-
-    if action == "draw":
-        if game.get("organizer") != user_id or game.get("closed"):
-            await query.edit_message_text("❌ Нет прав на розыгрыш этой игры.")
-            return
-        participants = list(game["participants"].keys())
-        if len(participants) < 2:
-            await query.edit_message_text("Нужно минимум 2 участника.")
-            return
-
-        forbidden = game.get("forbidden_pairs") if game.get("avoid_previous") else None
-        assignments = make_derangement(participants, forbidden, game["participants"])
-        game["assignments"] = assignments
-        for uid in participants:
-            game["participants"][uid]["notified"] = False
-        save_games()
-
-        bot = context.bot
-        success = 0
-        for giver_id in participants:
-            if await send_assignment(bot, giver_id, code, game):
-                success += 1
-
-        await query.edit_message_text(
-            f"✅ Розыгрыш игры {code} проведён!\n"
-            f"Уведомления отправлены {success} из {len(participants)} участникам."
-        )
-        return
-
-    if action == "close":
-        if game.get("organizer") != user_id or game.get("closed"):
-            await query.edit_message_text("❌ Нельзя закрыть эту игру.")
-            return
-        game["closed"] = True
-        save_games()
-        await query.edit_message_text(f"✅ Игра {code} закрыта.")
-        return
-
-    if action == "participants":
-        if game.get("organizer") != user_id:
-            await query.edit_message_text("❌ Только организатор может смотреть участников.")
-            return
-        parts = game["participants"]
-        lines = [f"Участники игры {code} ({len(parts)} чел.):"]
-        for uid, info in parts.items():
-            name = info["name"]
-            wish = info["wishlist"] or "—"
-            lines.append(f"• {name} — {wish}")
-        await query.edit_message_text("\n".join(lines))
-        return
-
-    if action == "export":
-        if game.get("organizer") != user_id:
-            await query.edit_message_text("❌ Только организатор может экспортировать.")
-            return
-        if not game.get("assignments"):
-            await query.edit_message_text("❌ В этой игре ещё не было розыгрыша.")
-            return
-
-        parts = game["participants"]
-        lines = []
-        for giver_id, receiver_id in game["assignments"].items():
-            g_key = get_user_key(giver_id, parts)
-            r_key = get_user_key(receiver_id, parts)
-            if g_key.startswith("id:") or r_key.startswith("id:"):
-                continue
-            lines.append(f"@{g_key}:@{r_key}")
-
-        if not lines:
-            await query.edit_message_text("❌ Нет пар с username для экспорта.")
-            return
-
-        export_text = " ".join(lines)
-        reply = (
-            f"📤 Экспорт игры {code}\n\n"
-            f"Скопируйте и в следующем году используйте:\n"
-            f"`/import_previous {export_text}`\n\n"
-            f"Или просто:\n{export_text}"
-        )
-        await query.edit_message_text(reply, parse_mode="Markdown")
-        return
-
-
-async def myresult(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await check_and_send_pending(update, context)
-    user_id = update.effective_user.id
-    has_pending = False
-    for game in games.values():
-        if game.get("assignments") and user_id in game.get("participants", {}):
-            if not game["participants"][user_id].get("notified", False):
-                has_pending = True
-                break
-    if not has_pending:
-        await update.message.reply_text("У тебя нет неполученных результатов розыгрыша.")
-
-
-async def create_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
+async def cmd_create(update: Update, context: ContextTypes.DEFAULT_TYPE):
     intro = " ".join(context.args) if context.args else ""
-
-    game_code = uuid.uuid4().hex[:6].upper()
-    games[game_code] = {
-        "organizer": user.id,
-        "participants": {},
-        "closed": False,
-        "assignments": {},
-        "avoid_previous": False,
-        "forbidden_pairs": set(),
-        "intro": intro,
-    }
-    games[game_code]["participants"][user.id] = {
-        "name": user.full_name or user.username or "Участник",
-        "wishlist": "",
-        "username": user.username,
-        "notified": False,
-    }
-    save_games()
-
-    reply = (
-        f"✅ Игра создана!\n\n"
-        f"GameID: {game_code}\n\n"
-        f"Отправьте друзьям: /join {game_code}"
-    )
+    code = manager.create(update.effective_user, intro)
+    msg = f"✅ Игра создана!\nGameID: {code}\n\n/join {code}"
     if intro:
-        reply += f"\n\n📝 Вступительное сообщение сохранено."
-    await update.message.reply_text(reply)
+        msg += "\n\n📝 Вступительное сохранено."
+    await update.message.reply_text(msg)
 
 
-async def set_intro(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_setintro(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    res = await select_game(update, context, organizer=True, action="setintro_select")
+    if not res:
+        if context.args:
+            context.user_data["pending_intro"] = " ".join(context.args)
+        return
+    code, game = res
+    text = " ".join(context.args[1:] if context.args and context.args[0].upper() == code else context.args)
+    if not text and "pending_intro" in context.user_data:
+        text = context.user_data.pop("pending_intro")
+    if not text:
+        await update.message.reply_text("Укажите текст.")
+        return
+    game["intro"] = text
+    manager.save()
+    await update.message.reply_text(f"✅ Вступительное для {code} сохранено.")
+
+
+async def cmd_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Использование: /setintro [GameID] Ваш вступительный текст")
+        await update.message.reply_text("/join GameID")
         return
-
-    user_id = update.effective_user.id
-    args = context.args
-    possible_code = args[0].upper()
-    code = None
-    text_parts = args
-
-    if possible_code in games:
-        code = possible_code
-        text_parts = args[1:]
-
-    if not text_parts:
-        await update.message.reply_text("Укажите текст вступительного сообщения.")
-        return
-
-    intro = " ".join(text_parts)
-    user_games = get_user_games(user_id, as_organizer=True, only_active=True)
-
-    if not user_games:
-        await update.message.reply_text("У вас нет активных игр как организатора.")
-        return
-
-    if code:
-        game = next((g for c, g in user_games if c == code), None)
-        if not game:
-            await update.message.reply_text("❌ Игра не найдена.")
-            return
-    elif len(user_games) == 1:
-        code, game = user_games[0]
-    else:
-        await update.message.reply_text("Укажите GameID, у вас несколько игр.")
-        return
-
-    game["intro"] = intro
-    save_games()
-    await update.message.reply_text(f"✅ Вступительное сообщение для игры {code} сохранено.")
-
-
-async def join_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not context.args:
-        await update.message.reply_text("Использование: /join GameID")
-        return
-
     code = context.args[0].upper()
-    if code not in games:
-        await update.message.reply_text("❌ Игра с таким GameID не найдена.")
+    err = manager.join(code, update.effective_user)
+    if err:
+        await update.message.reply_text(f"❌ {err}")
         return
+    game = manager.games[code]
+    msg = f"✅ Вы в игре {code}!"
+    if game.get("intro"):
+        msg += f"\n\n📝 {game['intro']}"
+    await update.message.reply_text(msg)
 
-    game = games[code]
-    if game["closed"]:
-        await update.message.reply_text("❌ Игра закрыта, присоединиться нельзя.")
+
+async def cmd_mygames(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    games = manager.user_games(update.effective_user.id)
+    if not games:
+        await update.message.reply_text("Нет игр. /create")
         return
-
-    user = update.effective_user
-    if user.id in game["participants"]:
-        await update.message.reply_text("Вы уже в этой игре.")
-        return
-
-    game["participants"][user.id] = {
-        "name": user.full_name or user.username or "Участник",
-        "wishlist": "",
-        "username": user.username,
-        "notified": False,
-    }
-    save_games()
-
-    reply = f"✅ Вы присоединились к игре {code}!"
-    intro = game.get("intro", "").strip()
-    if intro:
-        reply += f"\n\n📝 Сообщение от организатора:\n{intro}"
-    await update.message.reply_text(reply)
+    buttons = [
+        [InlineKeyboardButton(f"{'❌' if g.get('closed') else '✅'} {c} ({len(g['participants'])})", callback_data=f"info:{c}")]
+        for c, g in games
+    ]
+    await update.message.reply_text("Ваши игры:", reply_markup=InlineKeyboardMarkup(buttons))
 
 
-async def set_wish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_setwish(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Использование: /setwish [GameID] Ваши пожелания")
+        await update.message.reply_text("/setwish [текст]")
         return
-
-    user_id = update.effective_user.id
-    args = context.args
-    possible_code = args[0].upper()
-    code = None
-    wish_parts = args
-
-    if possible_code in games and user_id in games[possible_code].get("participants", {}):
-        code = possible_code
-        wish_parts = args[1:]
-
-    if not wish_parts:
-        await update.message.reply_text("Укажите текст пожеланий.")
+    res = await select_game(update, context, organizer=False, action="setwish_select")
+    if not res:
+        context.user_data["pending_wish"] = " ".join(context.args)
         return
-
-    wish = " ".join(wish_parts)
-    user_games = get_user_games(user_id, only_active=True)
-
-    if code:
-        game = next((g for c, g in user_games if c == code), None)
-        if not game:
-            await update.message.reply_text("❌ Игра не найдена.")
-            return
-    elif len(user_games) == 1:
-        code, game = user_games[0]
-    else:
-        keyboard = build_game_keyboard(user_games, "setwish_select")
-        context.user_data["pending_wish"] = wish
-        await update.message.reply_text("Выберите игру для пожеланий:", reply_markup=keyboard)
+    code, game = res
+    text = " ".join(context.args[1:] if context.args and context.args[0].upper() == code else context.args)
+    if not text and "pending_wish" in context.user_data:
+        text = context.user_data.pop("pending_wish")
+    if not text:
+        await update.message.reply_text("Укажите текст.")
         return
+    game["participants"][update.effective_user.id]["wishlist"] = text
+    manager.save()
+    await update.message.reply_text(f"✅ Пожелания для {code} сохранены.")
 
-    game["participants"][user_id]["wishlist"] = wish
-    save_games()
-    await update.message.reply_text(f"✅ Пожелания сохранены для игры {code}!")
 
-
-async def list_participants(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    code = context.args[0].upper() if context.args else None
-    user_games = get_user_games(user_id, as_organizer=True, only_active=True)
-
-    if not user_games:
-        await update.message.reply_text("У вас нет активных игр как организатора.")
+async def cmd_participants(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    res = await select_game(update, context, organizer=True, action="participants")
+    if not res:
         return
-
-    if code:
-        game = next((g for c, g in user_games if c == code), None)
-        if not game:
-            await update.message.reply_text("❌ Игра не найдена.")
-            return
-    elif len(user_games) == 1:
-        code, game = user_games[0]
-    else:
-        keyboard = build_game_keyboard(user_games, "participants")
-        await update.message.reply_text("Выберите игру:", reply_markup=keyboard)
-        return
-
-    parts = game["participants"]
-    lines = [f"Участники игры {code} ({len(parts)} чел.):"]
-    for uid, info in parts.items():
-        name = info["name"]
-        uname = f"@{info['username']}" if info.get("username") else ""
-        wish = info["wishlist"] or "—"
-        lines.append(f"• {name} {uname} — {wish}")
+    code, game = res
+    lines = [f"Участники {code} ({len(game['participants'])}):"]
+    for uid, info in game["participants"].items():
+        un = f"@{info['username']}" if info.get("username") else ""
+        lines.append(f"• {info['name']} {un} — {info['wishlist'] or '—'}")
     await update.message.reply_text("\n".join(lines))
 
 
-async def draw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    code = context.args[0].upper() if context.args else None
-    user_games = get_user_games(user_id, as_organizer=True, only_active=True)
-
-    if not user_games:
-        await update.message.reply_text("У вас нет активных игр для розыгрыша.")
+async def cmd_draw(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    res = await select_game(update, context, organizer=True, action="draw")
+    if not res:
         return
-
-    if code:
-        game = next((g for c, g in user_games if c == code), None)
-        if not game:
-            await update.message.reply_text("❌ Игра не найдена.")
-            return
-    elif len(user_games) == 1:
-        code, game = user_games[0]
-    else:
-        keyboard = build_game_keyboard(user_games, "draw")
-        await update.message.reply_text("Выберите игру для розыгрыша:", reply_markup=keyboard)
+    code, game = res
+    parts = list(game["participants"].keys())
+    if len(parts) < 2:
+        await update.message.reply_text("Нужно ≥2 участника")
         return
-
-    participants = list(game["participants"].keys())
-    if len(participants) < 2:
-        await update.message.reply_text("Нужно минимум 2 участника.")
-        return
-
     forbidden = game.get("forbidden_pairs") if game.get("avoid_previous") else None
-    assignments = make_derangement(participants, forbidden, game["participants"])
-    game["assignments"] = assignments
-    for uid in participants:
+    game["assignments"] = derangement(parts, forbidden, game["participants"])
+    for uid in parts:
         game["participants"][uid]["notified"] = False
-    save_games()
+    manager.save()
 
-    bot = context.bot
-    success = 0
-    failed_names = []
-    for giver_id in participants:
-        if await send_assignment(bot, giver_id, code, game):
-            success += 1
-        else:
-            failed_names.append(game["participants"][giver_id]["name"])
-
-    reply = f"✅ Розыгрыш игры {code} проведён!\nУведомления отправлены {success} из {len(participants)} участникам."
-    if failed_names:
-        reply += "\n\n⚠️ Не удалось отправить:\n" + "\n".join(f"• {n}" for n in failed_names)
+    ok = 0
+    for uid in parts:
+        if await send_result(context.bot, uid, code, game):
+            ok += 1
+    msg = f"✅ Розыгрыш {code}! Отправлено {ok}/{len(parts)}"
     if game.get("avoid_previous"):
-        reply += "\n\n🛡 Учтены запрещённые пары из прошлых игр."
-    await update.message.reply_text(reply)
+        msg += "\n🛡 Учтены запрещённые пары"
+    await update.message.reply_text(msg)
 
 
-async def export_draw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    code = context.args[0].upper() if context.args else None
-    user_games = get_user_games(user_id, as_organizer=True)
-
-    if not user_games:
-        await update.message.reply_text("У вас нет игр как организатора.")
+async def cmd_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    res = await select_game(update, context, organizer=True, active=False, action="export")
+    if not res:
         return
-
-    if code:
-        game = next((g for c, g in user_games if c == code), None)
-        if not game:
-            await update.message.reply_text("❌ Игра не найдена.")
-            return
-    elif len(user_games) == 1:
-        code, game = user_games[0]
-    else:
-        keyboard = build_game_keyboard(user_games, "export")
-        await update.message.reply_text("Выберите игру для экспорта:", reply_markup=keyboard)
-        return
-
+    code, game = res
     if not game.get("assignments"):
-        await update.message.reply_text("❌ В этой игре ещё не было розыгрыша.")
+        await update.message.reply_text("Нет розыгрыша")
         return
-
-    parts = game["participants"]
     lines = []
-    for giver_id, receiver_id in game["assignments"].items():
-        g_key = get_user_key(giver_id, parts)
-        r_key = get_user_key(receiver_id, parts)
-        if g_key.startswith("id:") or r_key.startswith("id:"):
-            continue
-        lines.append(f"@{g_key}:@{r_key}")
-
+    for g_id, r_id in game["assignments"].items():
+        gk = get_key(g_id, game["participants"])
+        rk = get_key(r_id, game["participants"])
+        if not gk.startswith("id:") and not rk.startswith("id:"):
+            lines.append(f"@{gk}:@{rk}")
     if not lines:
-        await update.message.reply_text("❌ Нет пар с username для экспорта.")
+        await update.message.reply_text("Нет пар с username")
         return
-
-    export_text = " ".join(lines)
-    reply = (
-        f"📤 Экспорт игры {code}\n\n"
-        f"Скопируйте и в следующем году используйте:\n"
-        f"`/import_previous {export_text}`\n\n"
-        f"Или просто:\n{export_text}"
-    )
-    await update.message.reply_text(reply, parse_mode="Markdown")
+    text = " ".join(lines)
+    await update.message.reply_text(f"📤 Экспорт {code}\n\n`/import_previous {text}`\n\n{text}", parse_mode="Markdown")
 
 
-async def close_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    arg = context.args[0].upper() if context.args else None
-    user_games = get_user_games(user_id, as_organizer=True, only_active=True)
-
-    if not user_games:
-        await update.message.reply_text("У вас нет активных игр для закрытия.")
-        return
-
-    if arg in ("ALL", "ВСЕ", "ЗАКРЫТЬВСЕ"):
-        closed_count = 0
-        for c, g in user_games:
+async def cmd_close(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    arg = (context.args or [""])[0].upper()
+    if arg in ("ALL", "ВСЕ"):
+        games = manager.user_games(update.effective_user.id, organizer=True, active_only=True)
+        for _, g in games:
             g["closed"] = True
-            closed_count += 1
-        save_games()
-        await update.message.reply_text(f"✅ Закрыто игр: {closed_count}")
+        manager.save()
+        await update.message.reply_text(f"✅ Закрыто {len(games)}")
         return
-
-    code = arg
-    if code:
-        game = next((g for c, g in user_games if c == code), None)
-        if not game:
-            await update.message.reply_text("❌ Игра не найдена.")
-            return
-    elif len(user_games) == 1:
-        code, game = user_games[0]
-    else:
-        keyboard = build_game_keyboard(user_games, "close", include_all=True)
-        await update.message.reply_text("Выберите игру для закрытия:", reply_markup=keyboard)
+    res = await select_game(update, context, organizer=True, action="close", include_all=True)
+    if not res:
         return
-
+    code, game = res
     game["closed"] = True
-    save_games()
-    await update.message.reply_text(f"✅ Игра {code} закрыта.")
+    manager.save()
+    await update.message.reply_text(f"✅ {code} закрыта")
 
 
-async def avoid_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    if not context.args:
-        await update.message.reply_text("Использование: /avoid [GameID] on|off")
+async def cmd_avoid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args or context.args[-1].lower() not in ("on", "off", "вкл", "выкл"):
+        await update.message.reply_text("/avoid on|off")
         return
-
-    args = context.args
-    mode = args[-1].lower()
-    code = args[0].upper() if len(args) > 1 else None
-
-    if mode not in ("on", "off", "вкл", "выкл"):
-        await update.message.reply_text("Укажите on или off")
+    enable = context.args[-1].lower() in ("on", "вкл")
+    res = await select_game(update, context, organizer=True, action="avoid")
+    if not res:
         return
-
-    enable = mode in ("on", "вкл")
-
-    user_games = get_user_games(user_id, as_organizer=True, only_active=True)
-    if not user_games:
-        await update.message.reply_text("У вас нет активных игр.")
-        return
-
-    if code:
-        game = next((g for c, g in user_games if c == code), None)
-        if not game:
-            await update.message.reply_text("❌ Игра не найдена.")
-            return
-    elif len(user_games) == 1:
-        code, game = user_games[0]
-    else:
-        await update.message.reply_text("Укажите GameID, у вас несколько игр.")
-        return
-
+    code, game = res
     game["avoid_previous"] = enable
-    save_games()
-    status = "включено" if enable else "выключено"
-    await update.message.reply_text(f"✅ Избегание прошлых пар для {code}: {status}")
+    manager.save()
+    await update.message.reply_text(f"✅ Избегание для {code}: {'вкл' if enable else 'выкл'}")
 
 
-async def import_previous(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
+async def cmd_import_previous(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text(
-            "Использование:\n"
-            "/import_previous [GameID] @giver:@receiver @giver2:@receiver2 ...\n\n"
-            "Пример:\n"
-            "/import_previous ABC123 @alice:@bob @charlie:@dave"
-        )
+        await update.message.reply_text("/import_previous @a:@b @c:@d")
         return
-
-    args = context.args
-    possible_code = args[0].upper()
-    code = None
-    pairs_raw = args
-
-    if possible_code in games:
-        code = possible_code
-        pairs_raw = args[1:]
-
-    user_games = get_user_games(user_id, as_organizer=True, only_active=True)
-    if not user_games:
-        await update.message.reply_text("У вас нет активных игр.")
+    res = await select_game(update, context, organizer=True, action="import_prev")
+    if not res:
         return
-
-    if code:
-        game = next((g for c, g in user_games if c == code), None)
-        if not game:
-            await update.message.reply_text("❌ Игра не найдена или вы не организатор.")
-            return
-    elif len(user_games) == 1:
-        code, game = user_games[0]
-    else:
-        await update.message.reply_text("Укажите GameID.")
-        return
-
+    code, game = res
+    pairs = context.args[1:] if context.args and context.args[0].upper() == code else context.args
     added = 0
-    for pair_str in pairs_raw:
-        if ":" not in pair_str:
-            continue
-        g, r = pair_str.split(":", 1)
-        g = g.lower().lstrip("@").strip()
-        r = r.lower().lstrip("@").strip()
-        if g and r:
-            game.setdefault("forbidden_pairs", set()).add((g, r))
-            added += 1
-
-    save_games()
-    await update.message.reply_text(f"✅ Добавлено запрещённых пар: {added}\nВсего: {len(game.get('forbidden_pairs', set()))}")
+    for p in pairs:
+        if ":" in p:
+            a, b = p.split(":", 1)
+            a, b = a.lower().lstrip("@"), b.lower().lstrip("@")
+            if a and b:
+                game.setdefault("forbidden_pairs", set()).add((a, b))
+                added += 1
+    manager.save()
+    await update.message.reply_text(f"✅ Добавлено {added} пар (всего {len(game.get('forbidden_pairs', set()))})")
 
 
-async def import_from(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    if len(context.args) < 1:
-        await update.message.reply_text("Использование: /import_from [GameID] OLD_GAMEID")
+async def cmd_import_from(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("/import_from OLDCODE")
         return
-
-    args = context.args
-    old_code = args[-1].upper()
-    code = args[0].upper() if len(args) > 1 else None
-
-    if old_code not in games:
-        await update.message.reply_text("❌ Старая игра не найдена.")
+    old = context.args[-1].upper()
+    if old not in manager.games or not manager.games[old].get("assignments"):
+        await update.message.reply_text("Старая игра не найдена или без розыгрыша")
         return
-
-    old_game = games[old_code]
-    if not old_game.get("assignments"):
-        await update.message.reply_text("❌ В старой игре не было розыгрыша.")
+    res = await select_game(update, context, organizer=True, action="import_from")
+    if not res:
         return
+    code, game = res
+    old_g = manager.games[old]
+    for g_id, r_id in old_g["assignments"].items():
+        gk = get_key(g_id, old_g["participants"])
+        rk = get_key(r_id, old_g["participants"])
+        game.setdefault("forbidden_pairs", set()).add((gk, rk))
+    manager.save()
+    await update.message.reply_text(f"✅ Импортировано из {old}. Всего {len(game.get('forbidden_pairs', set()))} пар")
 
-    user_games = get_user_games(user_id, as_organizer=True, only_active=True)
-    if not user_games:
-        await update.message.reply_text("У вас нет активных игр.")
-        return
 
-    if code:
-        game = next((g for c, g in user_games if c == code), None)
-        if not game:
-            await update.message.reply_text("❌ Игра не найдена.")
-            return
-    elif len(user_games) == 1:
-        code, game = user_games[0]
-    else:
-        await update.message.reply_text("Укажите GameID текущей игры.")
-        return
+async def cmd_myresult(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await check_pending(update, context)
+    uid = update.effective_user.id
+    has = any(
+        g.get("assignments") and uid in g["participants"] and not g["participants"][uid].get("notified")
+        for g in manager.games.values()
+    )
+    if not has:
+        await update.message.reply_text("Нет неполученных результатов")
 
-    added = 0
-    old_parts = old_game["participants"]
-    for giver_id, receiver_id in old_game["assignments"].items():
-        g_key = get_user_key(giver_id, old_parts)
-        r_key = get_user_key(receiver_id, old_parts)
-        game.setdefault("forbidden_pairs", set()).add((g_key, r_key))
-        added += 1
 
-    save_games()
+async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    up = int(time.time() - START_TIME)
+    h, m = divmod(up // 60, 60)
+    s = up % 60
+    active = sum(1 for g in manager.games.values() if not g.get("closed"))
+    total_p = sum(len(g["participants"]) for g in manager.games.values())
     await update.message.reply_text(
-        f"✅ Импортировано {added} пар из игры {old_code}\n"
-        f"Всего запрещённых: {len(game.get('forbidden_pairs', set()))}"
+        f"ℹ️ v{VERSION}\n"
+        f"Uptime: {h}ч {m}м {s}с\n"
+        f"Активных: {active} / Всего: {len(manager.games)}\n"
+        f"Участников: {total_p}\n"
+        f"github.com/CrazyBulba/PSLAB_SecretSanta"
     )
 
 
-async def setup_bot_commands(application: Application) -> None:
-    commands = [
-        BotCommand("start", "Приветствие и помощь"),
-        BotCommand("create", "Создать новую игру"),
-        BotCommand("setintro", "Задать вступительное сообщение"),
-        BotCommand("join", "Присоединиться к игре"),
-        BotCommand("mygames", "Мои игры"),
-        BotCommand("setwish", "Указать пожелания"),
-        BotCommand("participants", "Список участников"),
-        BotCommand("draw", "Провести розыгрыш"),
-        BotCommand("export", "Экспорт жеребьёвки"),
-        BotCommand("close", "Закрыть игру"),
-        BotCommand("avoid", "Избегать прошлые пары"),
-        BotCommand("import_previous", "Загрузить прошлые пары"),
-        BotCommand("import_from", "Импорт из другой игры"),
-        BotCommand("myresult", "Получить результат"),
-        BotCommand("info", "Информация о боте"),
-        BotCommand("help", "Помощь"),
-    ]
-    await application.bot.set_my_commands(commands)
-    logger.info("Меню команд зарегистрировано")
+# ─── Callbacks ───
 
+async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data or ""
+    if ":" not in data:
+        return
+    action, code = data.split(":", 1)
+    uid = query.from_user.id
 
-def main() -> None:
-    if not TOKEN:
-        print("Ошибка: установите BOT_TOKEN в .env файле")
+    if action == "close" and code == "ALL":
+        games = manager.user_games(uid, organizer=True, active_only=True)
+        for _, g in games:
+            g["closed"] = True
+        manager.save()
+        await query.edit_message_text(f"✅ Закрыто {len(games)}")
         return
 
-    load_games()
+    if code not in manager.games:
+        await query.edit_message_text("Игра не найдена")
+        return
+    game = manager.games[code]
 
-    application = Application.builder().token(TOKEN).build()
+    if action == "info":
+        role = "орг" if game.get("organizer") == uid else "уч"
+        status = "закрыта" if game.get("closed") else "активна"
+        drawn = "да" if game.get("assignments") else "нет"
+        avoid = "вкл" if game.get("avoid_previous") else "выкл"
+        intro = "да" if game.get("intro") else "нет"
+        text = (
+            f"{code}\nСтатус: {status}\nРоль: {role}\n"
+            f"Участников: {len(game['participants'])}\n"
+            f"Розыгрыш: {drawn}\nИзбегать: {avoid} ({len(game.get('forbidden_pairs', set()))})\n"
+            f"Вступительное: {intro}"
+        )
+        buttons = []
+        if game.get("organizer") == uid and not game.get("closed"):
+            buttons.append([
+                InlineKeyboardButton("🎲 Розыгрыш", callback_data=f"draw:{code}"),
+                InlineKeyboardButton("👥 Уч", callback_data=f"participants:{code}"),
+            ])
+            buttons.append([InlineKeyboardButton("🔒 Закрыть", callback_data=f"close:{code}")])
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons) if buttons else None)
+        return
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("info", info_command))
-    application.add_handler(CommandHandler("mygames", mygames))
-    application.add_handler(CommandHandler("create", create_game))
-    application.add_handler(CommandHandler("setintro", set_intro))
-    application.add_handler(CommandHandler("join", join_game))
-    application.add_handler(CommandHandler("setwish", set_wish))
-    application.add_handler(CommandHandler("participants", list_participants))
-    application.add_handler(CommandHandler("draw", draw))
-    application.add_handler(CommandHandler("export", export_draw))
-    application.add_handler(CommandHandler("close", close_game))
-    application.add_handler(CommandHandler("avoid", avoid_command))
-    application.add_handler(CommandHandler("import_previous", import_previous))
-    application.add_handler(CommandHandler("import_from", import_from))
-    application.add_handler(CommandHandler("myresult", myresult))
-    application.add_handler(CallbackQueryHandler(callback_handler))
+    if action == "draw":
+        if game.get("organizer") != uid or game.get("closed"):
+            await query.edit_message_text("Нет прав")
+            return
+        parts = list(game["participants"].keys())
+        if len(parts) < 2:
+            await query.edit_message_text("≥2 участника")
+            return
+        forbidden = game.get("forbidden_pairs") if game.get("avoid_previous") else None
+        game["assignments"] = derangement(parts, forbidden, game["participants"])
+        for u in parts:
+            game["participants"][u]["notified"] = False
+        manager.save()
+        ok = sum(1 for u in parts if await send_result(context.bot, u, code, game))
+        await query.edit_message_text(f"✅ Розыгрыш {code}! {ok}/{len(parts)}")
+        return
 
-    application.add_handler(
-        MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, check_and_send_pending)
-    )
+    if action == "close":
+        if game.get("organizer") != uid:
+            await query.edit_message_text("Нет прав")
+            return
+        game["closed"] = True
+        manager.save()
+        await query.edit_message_text(f"✅ {code} закрыта")
+        return
 
-    application.post_init = setup_bot_commands
+    if action == "participants":
+        if game.get("organizer") != uid:
+            await query.edit_message_text("Только орг")
+            return
+        lines = [f"{code} ({len(game['participants'])}):"]
+        for uid_, info in game["participants"].items():
+            lines.append(f"• {info['name']} — {info['wishlist'] or '—'}")
+        await query.edit_message_text("\n".join(lines))
+        return
 
-    logger.info(f"Бот запущен... Версия {BOT_VERSION}")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    if action == "setwish_select":
+        wish = context.user_data.pop("pending_wish", None)
+        if not wish or uid not in game["participants"]:
+            await query.edit_message_text("Ошибка")
+            return
+        game["participants"][uid]["wishlist"] = wish
+        manager.save()
+        await query.edit_message_text(f"✅ Пожелания для {code} сохранены")
+        return
+
+    if action == "export":
+        if game.get("organizer") != uid or not game.get("assignments"):
+            await query.edit_message_text("Недоступно")
+            return
+        lines = []
+        for g_id, r_id in game["assignments"].items():
+            gk = get_key(g_id, game["participants"])
+            rk = get_key(r_id, game["participants"])
+            if not gk.startswith("id:") and not rk.startswith("id:"):
+                lines.append(f"@{gk}:@{rk}")
+        if lines:
+            text = " ".join(lines)
+            await query.edit_message_text(f"📤 {code}\n\n`/import_previous {text}`\n\n{text}", parse_mode="Markdown")
+        else:
+            await query.edit_message_text("Нет пар с username")
+        return
+
+
+async def setup(app: Application):
+    cmds = [
+        BotCommand("start", "Помощь"),
+        BotCommand("create", "Создать игру"),
+        BotCommand("setintro", "Вступительное"),
+        BotCommand("join", "Вступить"),
+        BotCommand("mygames", "Мои игры"),
+        BotCommand("setwish", "Пожелания"),
+        BotCommand("participants", "Участники"),
+        BotCommand("draw", "Розыгрыш"),
+        BotCommand("export", "Экспорт"),
+        BotCommand("close", "Закрыть"),
+        BotCommand("avoid", "Избегать прошлые"),
+        BotCommand("import_previous", "Загрузить пары"),
+        BotCommand("import_from", "Импорт из игры"),
+        BotCommand("myresult", "Мой результат"),
+        BotCommand("info", "Инфо"),
+    ]
+    await app.bot.set_my_commands(cmds)
+
+
+def main():
+    if not TOKEN:
+        print("BOT_TOKEN missing")
+        return
+    app = Application.builder().token(TOKEN).build()
+    handlers = [
+        CommandHandler("start", start),
+        CommandHandler("help", start),
+        CommandHandler("create", cmd_create),
+        CommandHandler("setintro", cmd_setintro),
+        CommandHandler("join", cmd_join),
+        CommandHandler("mygames", cmd_mygames),
+        CommandHandler("setwish", cmd_setwish),
+        CommandHandler("participants", cmd_participants),
+        CommandHandler("draw", cmd_draw),
+        CommandHandler("export", cmd_export),
+        CommandHandler("close", cmd_close),
+        CommandHandler("avoid", cmd_avoid),
+        CommandHandler("import_previous", cmd_import_previous),
+        CommandHandler("import_from", cmd_import_from),
+        CommandHandler("myresult", cmd_myresult),
+        CommandHandler("info", cmd_info),
+        CallbackQueryHandler(callback),
+        MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, check_pending),
+    ]
+    for h in handlers:
+        app.add_handler(h)
+    app.post_init = setup
+    logger.info(f"Bot v{VERSION} started")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
