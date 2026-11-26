@@ -1,6 +1,6 @@
 """
-Secret Santa Telegram Bot — v1.10.0
-Формат сообщения об игре в /mygames.
+Secret Santa Telegram Bot — v1.11.0
+Кнопка «Редактировать» в меню игры.
 """
 
 import json
@@ -134,7 +134,6 @@ def get_key(uid: int, parts: dict) -> str:
 
 
 def extract_amount(text: str) -> str:
-    """Пытается вытащить сумму из текста (напр. 3000 рублей, 50$, 2000₽)."""
     if not text:
         return ""
     m = re.search(r"(\d+[\s]?[рублей₽$]|до\s*\d+|\d+\s*р\.?)", text, re.IGNORECASE)
@@ -257,7 +256,6 @@ async def handle_awaiting(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if kind == "intro" and code and code in manager.games:
         manager.games[code]["intro"] = text
-        # автоизвлечение суммы
         amount = extract_amount(text)
         if amount and not manager.games[code].get("gift_amount"):
             manager.games[code]["gift_amount"] = amount
@@ -308,28 +306,24 @@ async def handle_awaiting(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 def build_game_info(code: str, game: dict, user_id: int) -> str:
-    """Формирует красивое сообщение об игре."""
     parts = game["participants"]
     is_org = game.get("organizer") == user_id
     my_info = parts.get(user_id, {})
 
     lines = []
 
-    # Вступительное
     intro = game.get("intro", "").strip()
     if intro:
         lines.append(f"📝 {intro}")
     else:
         lines.append("📝 Вступительное не задано")
 
-    # Сумма
     amount = game.get("gift_amount") or extract_amount(intro)
     lines.append(f"💰 Сумма на подарок: {amount or '—'}")
 
     lines.append(f"🆔 ID: {code}")
     lines.append("")
 
-    # Участник
     lines.append("── Участник ──")
     assignments = game.get("assignments", {})
     if user_id in assignments:
@@ -348,7 +342,6 @@ def build_game_info(code: str, game: dict, user_id: int) -> str:
     lines.append(f"✨ Мое желание: {my_wish or '—'}")
     lines.append(f"👥 Участников: {len(parts)}")
 
-    # Организатор
     if is_org:
         lines.append("")
         lines.append("── Организатор ──")
@@ -365,6 +358,20 @@ def build_game_info(code: str, game: dict, user_id: int) -> str:
                 lines.append(f"   ... и ещё {len(forbidden)-10}")
 
     return "\n".join(lines)
+
+
+def build_edit_keyboard(code: str) -> InlineKeyboardMarkup:
+    buttons = [
+        [
+            InlineKeyboardButton("📝 Вступительное", callback_data=f"edit_intro:{code}"),
+            InlineKeyboardButton("💰 Сумма", callback_data=f"edit_amount:{code}"),
+        ],
+        [
+            InlineKeyboardButton("🛡 Избегать on/off", callback_data=f"toggle_avoid:{code}"),
+            InlineKeyboardButton("← Назад", callback_data=f"info:{code}"),
+        ],
+    ]
+    return InlineKeyboardMarkup(buttons)
 
 
 # ─── Commands ───
@@ -673,8 +680,45 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton("🎲 Розыгрыш", callback_data=f"draw:{code}"),
                 InlineKeyboardButton("👥 Уч", callback_data=f"participants:{code}"),
             ])
-            buttons.append([InlineKeyboardButton("🔒 Закрыть", callback_data=f"close:{code}")])
+            buttons.append([
+                InlineKeyboardButton("✏️ Редактировать", callback_data=f"edit:{code}"),
+                InlineKeyboardButton("🔒 Закрыть", callback_data=f"close:{code}"),
+            ])
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons) if buttons else None)
+        return
+
+    if action == "edit":
+        if game.get("organizer") != uid:
+            await query.edit_message_text("Только организатор")
+            return
+        text = f"✏️ Редактирование игры {code}\n\nВыберите, что изменить:"
+        await query.edit_message_text(text, reply_markup=build_edit_keyboard(code))
+        return
+
+    if action == "edit_intro":
+        if game.get("organizer") != uid:
+            await query.edit_message_text("Нет прав")
+            return
+        context.user_data["awaiting"] = {"type": "intro", "code": code}
+        await query.edit_message_text(PROMPTS["intro"])
+        return
+
+    if action == "edit_amount":
+        if game.get("organizer") != uid:
+            await query.edit_message_text("Нет прав")
+            return
+        context.user_data["awaiting"] = {"type": "amount", "code": code}
+        await query.edit_message_text(PROMPTS["amount"])
+        return
+
+    if action == "toggle_avoid":
+        if game.get("organizer") != uid:
+            await query.edit_message_text("Нет прав")
+            return
+        game["avoid_previous"] = not game.get("avoid_previous", False)
+        manager.save()
+        status = "вкл" if game["avoid_previous"] else "выкл"
+        await query.edit_message_text(f"✅ Избегание: {status}\n\nВернуться в меню?", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← Назад", callback_data=f"info:{code}")]]))
         return
 
     if action == "draw":
