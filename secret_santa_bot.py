@@ -1,6 +1,6 @@
 """
 Бот для Тайного Санты (Secret Santa) в Telegram.
-С возможностью повторного розыгрыша, закрытием игры и сохранением состояния между перезапусками.
+Поддержка нескольких игр, повторного розыгрыша, закрытия и сохранения состояния.
 """
 
 import json
@@ -10,7 +10,7 @@ import random
 import time
 import uuid
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional, Tuple
 
 from dotenv import load_dotenv
 from telegram import Update
@@ -59,7 +59,6 @@ def load_games() -> None:
         try:
             with open(DATA_FILE, "r", encoding="utf-8") as f:
                 raw = json.load(f)
-            # JSON сохраняет ключи как строки — преобразуем user_id обратно в int
             games = {}
             for code, game in raw.items():
                 game["participants"] = {
@@ -83,7 +82,6 @@ def save_games() -> None:
     """Сохраняет игры в файл."""
     try:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        # Преобразуем int-ключи в строки для JSON
         to_save = {}
         for code, game in games.items():
             g = dict(game)
@@ -98,8 +96,53 @@ def save_games() -> None:
         logger.error(f"Ошибка сохранения игр: {e}")
 
 
+def get_user_games(user_id: int, as_organizer: bool = False, only_active: bool = False) -> List[Tuple[str, Dict]]:
+    """Возвращает список (код, игра) для пользователя."""
+    result = []
+    for code, game in games.items():
+        if only_active and game.get("closed"):
+            continue
+        if as_organizer:
+            if game.get("organizer") == user_id:
+                result.append((code, game))
+        else:
+            if user_id in game.get("participants", {}):
+                result.append((code, game))
+    return result
+
+
+def resolve_game(user_id: int, code: Optional[str], as_organizer: bool = False, only_active: bool = True) -> Tuple[Optional[str], Optional[Dict], Optional[str]]:
+    """
+    Находит игру по коду или автоматически, если игра одна.
+    Возвращает (code, game, error_message)
+    """
+    user_games = get_user_games(user_id, as_organizer=as_organizer, only_active=only_active)
+
+    if code:
+        code = code.upper()
+        for c, g in user_games:
+            if c == code:
+                return c, g, None
+        return None, None, f"❌ Игра {code} не найдена или у вас нет к ней доступа."
+
+    if not user_games:
+        role = "организатора" if as_organizer else "участника"
+        return None, None, f"У вас нет активных игр как {role}."
+
+    if len(user_games) == 1:
+        return user_games[0]
+
+    # Несколько игр — нужно указать код
+    lines = ["У вас несколько игр. Укажите код:"]
+    for c, g in user_games:
+        status = "закрыта" if g.get("closed") else "активна"
+        role = "организатор" if g.get("organizer") == user_id else "участник"
+        lines.append(f"• {c} ({status}, {role}, {len(g.get('participants', {}))} чел.)")
+    return None, None, "\n".join(lines)
+
+
 def make_derangement(items: list) -> dict:
-    """Создаёт случайное распределение без фиксированных точек (никто не получает себя)."""
+    """Создаёт случайное распределение без фиксированных точек."""
     if len(items) < 2:
         return {}
     receivers = items[:]
@@ -111,7 +154,7 @@ def make_derangement(items: list) -> dict:
 
 
 async def send_assignment(bot, user_id: int, code: str, game: dict) -> bool:
-    """Пытается отправить результат конкретному участнику. Возвращает True при успехе."""
+    """Пытается отправить результат конкретному участнику."""
     if user_id not in game["assignments"]:
         return False
 
@@ -145,7 +188,7 @@ async def send_assignment(bot, user_id: int, code: str, game: dict) -> bool:
 
 
 async def check_and_send_pending(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Проверяет, есть ли у пользователя неполученные результаты, и отправляет их."""
+    """Проверяет и отправляет неполученные результаты."""
     user_id = update.effective_user.id
     bot = context.bot
     sent_any = False
@@ -169,13 +212,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Команды:\n"
         "/create — создать новую игру\n"
         "/join КОД — присоединиться к игре\n"
-        "/setwish текст — указать свои пожелания\n"
-        "/participants — список участников (для организатора)\n"
-        "/draw — провести / перекрутить розыгрыш (организатор)\n"
-        "/close — закрыть игру (организатор)\n"
-        "/myresult — получить свой результат (если ещё не получил)\n"
-        "/info — информация о боте и версии\n"
+        "/mygames — список ваших игр\n"
+        "/setwish [КОД] текст — указать пожелания\n"
+        "/participants [КОД] — список участников (организатор)\n"
+        "/draw [КОД] — провести / перекрутить розыгрыш (организатор)\n"
+        "/close [КОД] — закрыть игру (организатор)\n"
+        "/myresult — получить свой результат\n"
+        "/info — информация о боте\n"
         "/help — помощь\n\n"
+        "Если игр несколько, указывайте код в командах.\n"
         "Важно: чтобы получить результат, нужно хотя бы раз написать боту в личку."
     )
     await update.message.reply_text(text)
@@ -186,7 +231,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Показать информацию о боте, версию и статистику."""
+    """Показать информацию о боте."""
     uptime_sec = int(time.time() - START_TIME)
     hours, rem = divmod(uptime_sec, 3600)
     minutes, seconds = divmod(rem, 60)
@@ -206,6 +251,27 @@ async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"Репозиторий: github.com/CrazyBulba/PSLAB_SecretSanta"
     )
     await update.message.reply_text(text)
+
+
+async def mygames(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Показать список игр пользователя."""
+    user_id = update.effective_user.id
+    user_games = get_user_games(user_id)
+
+    if not user_games:
+        await update.message.reply_text("Вы не участвуете ни в одной игре.\nСоздайте новую: /create")
+        return
+
+    lines = ["Ваши игры:"]
+    for code, game in user_games:
+        role = "организатор" if game.get("organizer") == user_id else "участник"
+        status = "закрыта" if game.get("closed") else "активна"
+        drawn = " (розыгрыш был)" if game.get("assignments") else ""
+        parts = len(game.get("participants", {}))
+        lines.append(f"• {code} — {status}, {role}, {parts} чел.{drawn}")
+
+    lines.append("\nДля управления указывайте код: /draw КОД, /close КОД и т.д.")
+    await update.message.reply_text("\n".join(lines))
 
 
 async def myresult(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -277,71 +343,76 @@ async def join_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     save_games()
     await update.message.reply_text(
         f"✅ Вы присоединились к игре {code}!\n"
-        f"Не забудьте указать пожелания: /setwish Ваши пожелания\n\n"
+        f"Не забудьте указать пожелания: /setwish {code} Ваши пожелания\n\n"
         f"Результат розыгрыша придёт сюда в личку после /draw."
     )
 
 
 async def set_wish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Установить список пожеланий."""
+    """Установить список пожеланий. Поддерживает опциональный код игры."""
     if not context.args:
-        await update.message.reply_text("Использование: /setwish Ваши пожелания к подарку")
+        await update.message.reply_text("Использование: /setwish [КОД] Ваши пожелания")
         return
 
-    wish = " ".join(context.args)
     user_id = update.effective_user.id
-    found = False
+    args = context.args
 
-    for code, game in games.items():
-        if user_id in game["participants"] and not game["closed"]:
-            game["participants"][user_id]["wishlist"] = wish
-            save_games()
-            await update.message.reply_text("✅ Пожелания сохранены!")
-            found = True
-            break
+    # Проверяем, является ли первый аргумент кодом игры
+    possible_code = args[0].upper()
+    code = None
+    wish_parts = args
 
-    if not found:
-        await update.message.reply_text("Вы не участвуете ни в одной активной игре.")
+    if possible_code in games and user_id in games[possible_code].get("participants", {}):
+        code = possible_code
+        wish_parts = args[1:]
+
+    if not wish_parts:
+        await update.message.reply_text("Укажите текст пожеланий.")
+        return
+
+    wish = " ".join(wish_parts)
+
+    resolved_code, game, error = resolve_game(user_id, code, as_organizer=False, only_active=True)
+    if error:
+        await update.message.reply_text(error)
+        return
+
+    game["participants"][user_id]["wishlist"] = wish
+    save_games()
+    await update.message.reply_text(f"✅ Пожелания сохранены для игры {resolved_code}!")
 
 
 async def list_participants(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Показать участников (для организатора)."""
     user_id = update.effective_user.id
-    found = False
+    code = context.args[0].upper() if context.args else None
 
-    for code, game in games.items():
-        if game["organizer"] == user_id and not game["closed"]:
-            parts = game["participants"]
-            if not parts:
-                await update.message.reply_text("Пока никого нет.")
-                return
-            lines = [f"Участники игры {code} ({len(parts)} чел.):"]
-            for uid, info in parts.items():
-                name = info["name"]
-                wish = info["wishlist"] or "—"
-                lines.append(f"• {name} — {wish}")
-            await update.message.reply_text("\n".join(lines))
-            found = True
-            break
+    resolved_code, game, error = resolve_game(user_id, code, as_organizer=True, only_active=True)
+    if error:
+        await update.message.reply_text(error)
+        return
 
-    if not found:
-        await update.message.reply_text("У вас нет активных игр как организатора.")
+    parts = game["participants"]
+    if not parts:
+        await update.message.reply_text("Пока никого нет.")
+        return
+
+    lines = [f"Участники игры {resolved_code} ({len(parts)} чел.):"]
+    for uid, info in parts.items():
+        name = info["name"]
+        wish = info["wishlist"] or "—"
+        lines.append(f"• {name} — {wish}")
+    await update.message.reply_text("\n".join(lines))
 
 
 async def draw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Провести или перекрутить розыгрыш."""
     user_id = update.effective_user.id
-    target_game = None
-    code = None
+    code = context.args[0].upper() if context.args else None
 
-    for c, game in games.items():
-        if game["organizer"] == user_id and not game["closed"]:
-            target_game = game
-            code = c
-            break
-
-    if not target_game:
-        await update.message.reply_text("У вас нет активной игры для розыгрыша.")
+    resolved_code, target_game, error = resolve_game(user_id, code, as_organizer=True, only_active=True)
+    if error:
+        await update.message.reply_text(error)
         return
 
     participants = list(target_game["participants"].keys())
@@ -352,7 +423,6 @@ async def draw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     assignments = make_derangement(participants)
     target_game["assignments"] = assignments
 
-    # Сбрасываем флаги уведомлений
     for uid in participants:
         target_game["participants"][uid]["notified"] = False
 
@@ -363,17 +433,17 @@ async def draw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     failed_names = []
 
     for giver_id in participants:
-        if await send_assignment(bot, giver_id, code, target_game):
+        if await send_assignment(bot, giver_id, resolved_code, target_game):
             success += 1
         else:
             name = target_game["participants"][giver_id]["name"]
             failed_names.append(name)
 
     reply = (
-        f"✅ Розыгрыш проведён!\n"
+        f"✅ Розыгрыш игры {resolved_code} проведён!\n"
         f"Уведомления отправлены {success} из {len(participants)} участникам.\n"
-        f"Игра остаётся открытой — можно перекрутить ещё раз командой /draw.\n"
-        f"Закрыть игру: /close"
+        f"Игра остаётся открытой — можно перекрутить ещё раз: /draw {resolved_code}\n"
+        f"Закрыть игру: /close {resolved_code}"
     )
 
     if failed_names:
@@ -389,21 +459,19 @@ async def draw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def close_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Закрыть игру."""
     user_id = update.effective_user.id
-    found = False
+    code = context.args[0].upper() if context.args else None
 
-    for code, game in games.items():
-        if game["organizer"] == user_id and not game["closed"]:
-            game["closed"] = True
-            save_games()
-            await update.message.reply_text(
-                f"✅ Игра {code} закрыта.\n"
-                f"Больше нельзя присоединяться и крутить рулетку."
-            )
-            found = True
-            break
+    resolved_code, game, error = resolve_game(user_id, code, as_organizer=True, only_active=True)
+    if error:
+        await update.message.reply_text(error)
+        return
 
-    if not found:
-        await update.message.reply_text("У вас нет активных игр для закрытия.")
+    game["closed"] = True
+    save_games()
+    await update.message.reply_text(
+        f"✅ Игра {resolved_code} закрыта.\n"
+        f"Больше нельзя присоединяться и крутить рулетку."
+    )
 
 
 def main() -> None:
@@ -418,6 +486,7 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("info", info_command))
+    application.add_handler(CommandHandler("mygames", mygames))
     application.add_handler(CommandHandler("create", create_game))
     application.add_handler(CommandHandler("join", join_game))
     application.add_handler(CommandHandler("setwish", set_wish))
@@ -426,7 +495,6 @@ def main() -> None:
     application.add_handler(CommandHandler("close", close_game))
     application.add_handler(CommandHandler("myresult", myresult))
 
-    # На любое личное сообщение проверяем, не нужно ли дослать результат
     application.add_handler(
         MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, check_and_send_pending)
     )
