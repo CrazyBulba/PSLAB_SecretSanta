@@ -26,6 +26,17 @@ START_TIME = time.time()
 NOT_ENOUGH = "Недостаточно участников! Должно быть больше 1."
 
 
+async def notify_participants(bot, game: dict, code: str, text: str, exclude: int = None):
+    """Отправить уведомление всем участникам (кроме exclude)."""
+    for uid in list(game["participants"].keys()):
+        if uid == exclude:
+            continue
+        try:
+            await bot.send_message(uid, text)
+        except Exception:
+            pass
+
+
 async def select_game(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -108,12 +119,21 @@ async def handle_awaiting(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     context.user_data.pop("awaiting", None)
 
     if kind == "intro" and code and code in manager.games:
+        old = manager.games[code].get("intro", "")
         manager.games[code]["intro"] = text
         amount = extract_amount(text)
         if amount and not manager.games[code].get("gift_amount"):
             manager.games[code]["gift_amount"] = amount
         manager.save()
         await update.message.reply_text(f"✅ Вступительное для игры {code} сохранено!")
+        if old != text:
+            await notify_participants(
+                context.bot,
+                manager.games[code],
+                code,
+                f"📝 В игре {code} изменено вступительное слово:\n\n{text}",
+                exclude=update.effective_user.id,
+            )
         return True
 
     if kind == "wish" and code and code in manager.games:
@@ -152,9 +172,18 @@ async def handle_awaiting(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return True
 
     if kind == "amount" and code and code in manager.games:
+        old = manager.games[code].get("gift_amount", "")
         manager.games[code]["gift_amount"] = text
         manager.save()
         await update.message.reply_text(f"✅ Сумма для {code}: {text}")
+        if old != text:
+            await notify_participants(
+                context.bot,
+                manager.games[code],
+                code,
+                f"💰 В игре {code} изменена сумма на подарок: {text}",
+                exclude=update.effective_user.id,
+            )
         return True
 
     if kind == "new_id" and code and code in manager.games:
@@ -165,11 +194,17 @@ async def handle_awaiting(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if new_code in manager.games:
             await update.message.reply_text("❌ Такой GameID уже занят.")
             return True
-        # Переносим игру
         game = manager.games.pop(code)
         manager.games[new_code] = game
         manager.save()
         await update.message.reply_text(f"✅ GameID изменён: {code} → {new_code}")
+        await notify_participants(
+            context.bot,
+            game,
+            new_code,
+            f"🆔 GameID игры изменён: {code} → {new_code}\nИспользуйте новый код для присоединения.",
+            exclude=update.effective_user.id,
+        )
         return True
 
     return False
@@ -207,6 +242,14 @@ async def cmd_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     game = manager.games[code]
     await update.message.reply_text(join_success(code, game.get("intro", "")))
+    # Уведомление организатору
+    org = game.get("organizer")
+    if org and org != update.effective_user.id:
+        try:
+            name = update.effective_user.full_name or update.effective_user.username or "Участник"
+            await context.bot.send_message(org, f"✅ В игру {code} вступил: {name}")
+        except Exception:
+            pass
 
 
 async def cmd_mygames(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -270,6 +313,13 @@ async def cmd_draw(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if game.get("avoid_previous"):
         msg += "\n🛡 Учтены запрещённые пары"
     await update.message.reply_text(msg)
+    await notify_participants(
+        context.bot,
+        game,
+        code,
+        f"🎲 В игре {code} проведён розыгрыш! Проверьте личные сообщения.",
+        exclude=update.effective_user.id,
+    )
 
 
 async def cmd_myresult(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -336,7 +386,50 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton("✏️ Редактировать", callback_data=f"edit:{code}"),
                 InlineKeyboardButton("🗑 Удалить", callback_data=f"close:{code}"),
             ])
+        else:
+            buttons.append([
+                InlineKeyboardButton("🚪 Выйти из игры", callback_data=f"leave_confirm:{code}"),
+            ])
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons) if buttons else None)
+        return
+
+    if action == "leave_confirm":
+        buttons = [
+            [
+                InlineKeyboardButton("✅ Да, выйти", callback_data=f"leave_yes:{code}"),
+                InlineKeyboardButton("❌ Отмена", callback_data=f"info:{code}"),
+            ]
+        ]
+        await query.edit_message_text(
+            f"Вы точно хотите выйти из игры {code}?",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+        return
+
+    if action == "leave_yes":
+        if uid not in game["participants"]:
+            await query.edit_message_text("Вы уже не в игре")
+            return
+        if game.get("organizer") == uid:
+            await query.edit_message_text("Организатор не может выйти. Удалите игру или передайте права.")
+            return
+        name = game["participants"][uid].get("name", "Участник")
+        del game["participants"][uid]
+        # Чистим назначения, если были
+        if "assignments" in game:
+            game["assignments"].pop(uid, None)
+            for k in list(game["assignments"].keys()):
+                if game["assignments"][k] == uid:
+                    del game["assignments"][k]
+        manager.save()
+        await query.edit_message_text(f"✅ Вы вышли из игры {code}")
+        # Уведомление организатору
+        org = game.get("organizer")
+        if org:
+            try:
+                await context.bot.send_message(org, f"🚪 {name} вышел из игры {code}")
+            except Exception:
+                pass
         return
 
     if action == "edit":
@@ -424,6 +517,13 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         manager.save()
         ok = sum(1 for u in parts if await send_result(context.bot, u, code, game))
         await query.edit_message_text(f"✅ Розыгрыш {code}! {ok}/{len(parts)}")
+        await notify_participants(
+            context.bot,
+            game,
+            code,
+            f"🎲 В игре {code} проведён розыгрыш! Проверьте личные сообщения.",
+            exclude=uid,
+        )
         return
 
     if action == "close":
