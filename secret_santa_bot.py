@@ -1,6 +1,6 @@
 """
 Бот для Тайного Санты (Secret Santa) в Telegram.
-С поддержкой повторной отправки результатов тем, кто не получил их сразу.
+С возможностью повторного розыгрыша и отдельным закрытием игры.
 """
 
 import logging
@@ -22,7 +22,7 @@ from telegram.ext import (
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 
-# Хранилище игр в памяти (для продакшена используйте БД)
+# Хранилище игр в памяти
 games: Dict[str, Dict[str, Any]] = {}
 
 logging.basicConfig(
@@ -83,7 +83,7 @@ async def check_and_send_pending(update: Update, context: ContextTypes.DEFAULT_T
     sent_any = False
 
     for code, game in games.items():
-        if game.get("drawn") and user_id in game.get("participants", {}):
+        if game.get("assignments") and user_id in game.get("participants", {}):
             if not game["participants"][user_id].get("notified", False):
                 if await send_assignment(bot, user_id, code, game):
                     sent_any = True
@@ -103,7 +103,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/join КОД — присоединиться к игре\n"
         "/setwish текст — указать свои пожелания\n"
         "/participants — список участников (для организатора)\n"
-        "/draw — провести розыгрыш (только организатор)\n"
+        "/draw — провести / перекрутить розыгрыш (организатор)\n"
+        "/close — закрыть игру (организатор)\n"
         "/myresult — получить свой результат (если ещё не получил)\n"
         "/help — помощь\n\n"
         "Важно: чтобы получить результат, нужно хотя бы раз написать боту в личку."
@@ -118,11 +119,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def myresult(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Принудительно проверить и отправить результат."""
     await check_and_send_pending(update, context)
-    # Если ничего не отправилось — сказать об этом
     user_id = update.effective_user.id
     has_pending = False
     for game in games.values():
-        if game.get("drawn") and user_id in game.get("participants", {}):
+        if game.get("assignments") and user_id in game.get("participants", {}):
             if not game["participants"][user_id].get("notified", False):
                 has_pending = True
                 break
@@ -137,7 +137,7 @@ async def create_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     games[game_code] = {
         "organizer": user.id,
         "participants": {},
-        "drawn": False,
+        "closed": False,
         "assignments": {},
     }
     games[game_code]["participants"][user.id] = {
@@ -166,8 +166,8 @@ async def join_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     game = games[code]
-    if game["drawn"]:
-        await update.message.reply_text("❌ Розыгрыш уже проведён, присоединиться нельзя.")
+    if game["closed"]:
+        await update.message.reply_text("❌ Игра закрыта, присоединиться нельзя.")
         return
 
     user = update.effective_user
@@ -199,7 +199,7 @@ async def set_wish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     found = False
 
     for code, game in games.items():
-        if user_id in game["participants"] and not game["drawn"]:
+        if user_id in game["participants"] and not game["closed"]:
             game["participants"][user_id]["wishlist"] = wish
             await update.message.reply_text("✅ Пожелания сохранены!")
             found = True
@@ -215,7 +215,7 @@ async def list_participants(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     found = False
 
     for code, game in games.items():
-        if game["organizer"] == user_id and not game["drawn"]:
+        if game["organizer"] == user_id and not game["closed"]:
             parts = game["participants"]
             if not parts:
                 await update.message.reply_text("Пока никого нет.")
@@ -234,13 +234,13 @@ async def list_participants(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 async def draw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Провести розыгрыш и попытаться разослать результаты."""
+    """Провести или перекрутить розыгрыш."""
     user_id = update.effective_user.id
     target_game = None
     code = None
 
     for c, game in games.items():
-        if game["organizer"] == user_id and not game["drawn"]:
+        if game["organizer"] == user_id and not game["closed"]:
             target_game = game
             code = c
             break
@@ -256,9 +256,8 @@ async def draw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     assignments = make_derangement(participants)
     target_game["assignments"] = assignments
-    target_game["drawn"] = True
 
-    # Инициализируем флаг notified
+    # Сбрасываем флаги уведомлений
     for uid in participants:
         target_game["participants"][uid]["notified"] = False
 
@@ -276,19 +275,37 @@ async def draw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     reply = (
         f"✅ Розыгрыш проведён!\n"
         f"Уведомления отправлены {success} из {len(participants)} участникам.\n"
+        f"Игра остаётся открытой — можно перекрутить ещё раз командой /draw.\n"
+        f"Закрыть игру: /close"
     )
 
     if failed_names:
         reply += (
-            f"\n⚠️ Не удалось отправить:\n"
+            f"\n\n⚠️ Не удалось отправить:\n"
             + "\n".join(f"• {n}" for n in failed_names)
-            + "\n\nОни получат результат автоматически, когда напишут боту в личку "
-            "(или можно попросить их отправить /start или /myresult)."
+            + "\n\nОни получат результат автоматически, когда напишут боту в личку."
         )
-    else:
-        reply += "\nВсе получили сообщения в личку!"
 
     await update.message.reply_text(reply)
+
+
+async def close_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Закрыть игру."""
+    user_id = update.effective_user.id
+    found = False
+
+    for code, game in games.items():
+        if game["organizer"] == user_id and not game["closed"]:
+            game["closed"] = True
+            await update.message.reply_text(
+                f"✅ Игра {code} закрыта.\n"
+                f"Больше нельзя присоединяться и крутить рулетку."
+            )
+            found = True
+            break
+
+    if not found:
+        await update.message.reply_text("У вас нет активных игр для закрытия.")
 
 
 def main() -> None:
@@ -305,6 +322,7 @@ def main() -> None:
     application.add_handler(CommandHandler("setwish", set_wish))
     application.add_handler(CommandHandler("participants", list_participants))
     application.add_handler(CommandHandler("draw", draw))
+    application.add_handler(CommandHandler("close", close_game))
     application.add_handler(CommandHandler("myresult", myresult))
 
     # На любое личное сообщение проверяем, не нужно ли дослать результат
