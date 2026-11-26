@@ -111,7 +111,6 @@ def build_game_keyboard(user_games: List[Tuple[str, Dict]], action: str) -> Inli
     buttons = []
     for code, game in user_games:
         status = "❌" if game.get("closed") else "✅"
-        role = "👑" if game.get("organizer") else ""
         parts = len(game.get("participants", {}))
         text = f"{status} {code} ({parts} чел.)"
         buttons.append([InlineKeyboardButton(text, callback_data=f"{action}:{code}")])
@@ -268,7 +267,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     if action == "info":
         text = await show_game_info(code, game, user_id)
-        # Дополнительные кнопки для организатора
         buttons = []
         if game.get("organizer") == user_id and not game.get("closed"):
             buttons.append([
@@ -282,11 +280,24 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await query.edit_message_text(text)
         return
 
+    if action == "setwish_select":
+        wish = context.user_data.get("pending_wish")
+        if not wish:
+            await query.edit_message_text("❌ Нет сохранённых пожеланий. Попробуйте снова /setwish")
+            return
+        if user_id not in game.get("participants", {}):
+            await query.edit_message_text("❌ Вы не участник этой игры.")
+            return
+        game["participants"][user_id]["wishlist"] = wish
+        save_games()
+        context.user_data.pop("pending_wish", None)
+        await query.edit_message_text(f"✅ Пожелания сохранены для игры {code}!")
+        return
+
     if action == "draw":
         if game.get("organizer") != user_id or game.get("closed"):
             await query.edit_message_text("❌ Нет прав на розыгрыш этой игры.")
             return
-        # Выполняем розыгрыш
         participants = list(game["participants"].keys())
         if len(participants) < 2:
             await query.edit_message_text("Нужно минимум 2 участника.")
@@ -488,7 +499,6 @@ async def draw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Выберите игру для розыгрыша:", reply_markup=keyboard)
         return
 
-    # Выполняем розыгрыш (та же логика, что и в callback)
     participants = list(game["participants"].keys())
     if len(participants) < 2:
         await update.message.reply_text("Нужно минимум 2 участника.")
