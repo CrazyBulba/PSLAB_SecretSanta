@@ -1,5 +1,5 @@
 """
-Secret Santa Telegram Bot — точка входа v1.13.4
+Secret Santa Telegram Bot — точка входа v1.13.5
 Вся логика в модулях: messages, storage, handlers, utils.
 """
 
@@ -19,9 +19,7 @@ from handlers import (
     cmd_setwish,
     cmd_participants,
     cmd_draw,
-    cmd_export,
     cmd_close,
-    cmd_import_previous,
     cmd_myresult,
     cmd_info,
     callback,
@@ -51,9 +49,7 @@ def main():
         CommandHandler("setwish", cmd_setwish),
         CommandHandler("participants", cmd_participants),
         CommandHandler("draw", cmd_draw),
-        CommandHandler("export", cmd_export),
         CommandHandler("close", cmd_close),
-        CommandHandler("import_previous", cmd_import_previous),
         CommandHandler("myresult", cmd_myresult),
         CommandHandler("info", cmd_info),
         CallbackQueryHandler(callback),
