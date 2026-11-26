@@ -121,7 +121,7 @@ async def handle_awaiting(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             manager.games[code]["participants"][uid]["wishlist"] = text
             manager.save()
             await update.message.reply_text(f"✅ Пожелания для игры {code} сохранены!")
-        return True
+            return True
 
     if kind == "import_pairs" and code and code in manager.games:
         added = 0
@@ -254,23 +254,6 @@ async def cmd_draw(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if game.get("avoid_previous"):
         msg += "\n🛡 Учтены запрещённые пары"
     await update.message.reply_text(msg)
-
-
-async def cmd_close(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    arg = (context.args or [""])[0].upper()
-    if arg in ("ALL", "ВСЕ"):
-        games = manager.user_games(update.effective_user.id, organizer=True, active_only=True)
-        count = len(games)
-        for c, _ in games:
-            manager.delete(c)
-        await update.message.reply_text(f"✅ Удалено игр: {count}")
-        return
-    res = await select_game(update, context, organizer=True, action="close", include_all=True)
-    if not res:
-        return
-    code, game = res
-    manager.delete(code)
-    await update.message.reply_text(f"✅ Игра {code} удалена")
 
 
 async def cmd_myresult(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -469,7 +452,6 @@ async def setup(app):
         BotCommand("setwish", "Пожелания"),
         BotCommand("participants", "Участники"),
         BotCommand("draw", "Розыгрыш"),
-        BotCommand("close", "Удалить игру"),
         BotCommand("myresult", "Мой результат"),
         BotCommand("info", "Инфо"),
     ]
