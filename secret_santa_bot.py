@@ -1,7 +1,7 @@
 """
 Бот для Тайного Санты (Secret Santa) в Telegram.
 Поддержка нескольких игр, инлайн-меню, повторного розыгрыша,
-сохранения состояния и избегания повторения прошлых пар.
+сохранения состояния, избегания повторений и вступительного сообщения.
 """
 
 import json
@@ -52,7 +52,6 @@ logger = logging.getLogger(__name__)
 
 
 def get_user_key(user_id: int, participants: dict) -> str:
-    """Ключ для запрещённых пар: username (без @, lower) или id:XXXX."""
     info = participants.get(user_id, {})
     username = info.get("username")
     if username:
@@ -82,6 +81,7 @@ def load_games() -> None:
                 else:
                     game["forbidden_pairs"] = set()
                 game.setdefault("avoid_previous", False)
+                game.setdefault("intro", "")
                 games[code] = game
             logger.info(f"Загружено игр: {len(games)}")
         except Exception as e:
@@ -223,7 +223,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
         "🎅 Привет! Это бот для организации Тайного Санты.\n\n"
         "Команды:\n"
-        "/create — создать новую игру\n"
+        "/create [текст] — создать игру (можно сразу с вступительным)\n"
+        "/setintro [GameID] текст — задать/изменить вступительное сообщение\n"
         "/join GameID — присоединиться к игре\n"
         "/mygames — список ваших игр\n"
         "/setwish [GameID] текст — указать пожелания\n"
@@ -285,13 +286,15 @@ async def show_game_info(code: str, game: dict, user_id: int) -> str:
     drawn = "Да" if game.get("assignments") else "Нет"
     avoid = "вкл" if game.get("avoid_previous") else "выкл"
     forbidden_count = len(game.get("forbidden_pairs", set()))
+    has_intro = "да" if game.get("intro") else "нет"
     return (
         f"GameID: {code}\n"
         f"Статус: {status}\n"
         f"Ваша роль: {role}\n"
         f"Участников: {parts}\n"
         f"Розыгрыш был: {drawn}\n"
-        f"Избегать прошлые: {avoid} ({forbidden_count} пар)"
+        f"Избегать прошлые: {avoid} ({forbidden_count} пар)\n"
+        f"Вступительное: {has_intro}"
     )
 
 
@@ -451,6 +454,8 @@ async def myresult(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def create_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
+    intro = " ".join(context.args) if context.args else ""
+
     game_code = uuid.uuid4().hex[:6].upper()
     games[game_code] = {
         "organizer": user.id,
@@ -459,6 +464,7 @@ async def create_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         "assignments": {},
         "avoid_previous": False,
         "forbidden_pairs": set(),
+        "intro": intro,
     }
     games[game_code]["participants"][user.id] = {
         "name": user.full_name or user.username or "Участник",
@@ -467,11 +473,57 @@ async def create_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         "notified": False,
     }
     save_games()
-    await update.message.reply_text(
+
+    reply = (
         f"✅ Игра создана!\n\n"
         f"GameID: {game_code}\n\n"
         f"Отправьте друзьям: /join {game_code}"
     )
+    if intro:
+        reply += f"\n\n📝 Вступительное сообщение сохранено."
+    await update.message.reply_text(reply)
+
+
+async def set_intro(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.message.reply_text("Использование: /setintro [GameID] Ваш вступительный текст")
+        return
+
+    user_id = update.effective_user.id
+    args = context.args
+    possible_code = args[0].upper()
+    code = None
+    text_parts = args
+
+    if possible_code in games:
+        code = possible_code
+        text_parts = args[1:]
+
+    if not text_parts:
+        await update.message.reply_text("Укажите текст вступительного сообщения.")
+        return
+
+    intro = " ".join(text_parts)
+    user_games = get_user_games(user_id, as_organizer=True, only_active=True)
+
+    if not user_games:
+        await update.message.reply_text("У вас нет активных игр как организатора.")
+        return
+
+    if code:
+        game = next((g for c, g in user_games if c == code), None)
+        if not game:
+            await update.message.reply_text("❌ Игра не найдена.")
+            return
+    elif len(user_games) == 1:
+        code, game = user_games[0]
+    else:
+        await update.message.reply_text("Укажите GameID, у вас несколько игр.")
+        return
+
+    game["intro"] = intro
+    save_games()
+    await update.message.reply_text(f"✅ Вступительное сообщение для игры {code} сохранено.")
 
 
 async def join_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -501,7 +553,12 @@ async def join_game(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "notified": False,
     }
     save_games()
-    await update.message.reply_text(f"✅ Вы присоединились к игре {code}!")
+
+    reply = f"✅ Вы присоединились к игре {code}!"
+    intro = game.get("intro", "").strip()
+    if intro:
+        reply += f"\n\n📝 Сообщение от организатора:\n{intro}"
+    await update.message.reply_text(reply)
 
 
 async def set_wish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -852,6 +909,7 @@ async def setup_bot_commands(application: Application) -> None:
     commands = [
         BotCommand("start", "Приветствие и помощь"),
         BotCommand("create", "Создать новую игру"),
+        BotCommand("setintro", "Задать вступительное сообщение"),
         BotCommand("join", "Присоединиться к игре"),
         BotCommand("mygames", "Мои игры"),
         BotCommand("setwish", "Указать пожелания"),
@@ -884,6 +942,7 @@ def main() -> None:
     application.add_handler(CommandHandler("info", info_command))
     application.add_handler(CommandHandler("mygames", mygames))
     application.add_handler(CommandHandler("create", create_game))
+    application.add_handler(CommandHandler("setintro", set_intro))
     application.add_handler(CommandHandler("join", join_game))
     application.add_handler(CommandHandler("setwish", set_wish))
     application.add_handler(CommandHandler("participants", list_participants))
