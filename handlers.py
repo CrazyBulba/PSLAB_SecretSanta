@@ -180,39 +180,6 @@ async def cmd_create(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def cmd_setintro(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    res = await select_game(update, context, organizer=True, action="setintro_select")
-    if not res:
-        return
-    code, game = res
-    if context.args and not (context.args[0].upper() == code and len(context.args) == 1):
-        text = " ".join(context.args[1:] if context.args[0].upper() == code else context.args)
-        game["intro"] = text
-        amount = extract_amount(text)
-        if amount:
-            game["gift_amount"] = amount
-        manager.save()
-        await update.message.reply_text(f"✅ Вступительное для {code} сохранено.")
-        return
-    context.user_data["awaiting"] = {"type": "intro", "code": code}
-    await update.message.reply_text(PROMPTS["intro"])
-
-
-async def cmd_setamount(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    res = await select_game(update, context, organizer=True, action="setamount")
-    if not res:
-        return
-    code, game = res
-    if context.args and not (context.args[0].upper() == code and len(context.args) == 1):
-        text = " ".join(context.args[1:] if context.args[0].upper() == code else context.args)
-        game["gift_amount"] = text
-        manager.save()
-        await update.message.reply_text(f"✅ Сумма для {code}: {text}")
-        return
-    context.user_data["awaiting"] = {"type": "amount", "code": code}
-    await update.message.reply_text(PROMPTS["amount"])
-
-
 async def cmd_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("/join GameID")
@@ -327,20 +294,6 @@ async def cmd_close(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Игра {code} удалена")
 
 
-async def cmd_avoid(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args or context.args[-1].lower() not in ("on", "off", "вкл", "выкл"):
-        await update.message.reply_text("/avoid on|off")
-        return
-    enable = context.args[-1].lower() in ("on", "вкл")
-    res = await select_game(update, context, organizer=True, action="avoid")
-    if not res:
-        return
-    code, game = res
-    game["avoid_previous"] = enable
-    manager.save()
-    await update.message.reply_text(f"✅ Избегание для {code}: {'вкл' if enable else 'выкл'}")
-
-
 async def cmd_import_previous(update: Update, context: ContextTypes.DEFAULT_TYPE):
     res = await select_game(update, context, organizer=True, action="import_prev")
     if not res:
@@ -361,27 +314,6 @@ async def cmd_import_previous(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     context.user_data["awaiting"] = {"type": "import_pairs", "code": code}
     await update.message.reply_text(PROMPTS["import_pairs"])
-
-
-async def cmd_import_from(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("/import_from OLDCODE")
-        return
-    old = context.args[-1].upper()
-    if old not in manager.games or not manager.games[old].get("assignments"):
-        await update.message.reply_text("Старая игра не найдена или без розыгрыша")
-        return
-    res = await select_game(update, context, organizer=True, action="import_from")
-    if not res:
-        return
-    code, game = res
-    old_g = manager.games[old]
-    for g_id, r_id in old_g["assignments"].items():
-        gk = get_key(g_id, old_g["participants"])
-        rk = get_key(r_id, old_g["participants"])
-        game.setdefault("forbidden_pairs", set()).add((gk, rk))
-    manager.save()
-    await update.message.reply_text(f"✅ Импортировано из {old}. Всего {len(game.get('forbidden_pairs', set()))} пар")
 
 
 async def cmd_myresult(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -567,8 +499,6 @@ async def setup(app):
         BotCommand("start", "Помощь"),
         BotCommand("help", "Помощь"),
         BotCommand("create", "Создать игру"),
-        BotCommand("setintro", "Вступительное"),
-        BotCommand("setamount", "Сумма на подарок"),
         BotCommand("join", "Вступить"),
         BotCommand("mygames", "Мои игры"),
         BotCommand("setwish", "Пожелания"),
@@ -576,9 +506,7 @@ async def setup(app):
         BotCommand("draw", "Розыгрыш"),
         BotCommand("export", "Экспорт"),
         BotCommand("close", "Удалить игру"),
-        BotCommand("avoid", "Избегать прошлые"),
-        BotCommand("import_previous", "Загрузить пары"),
-        BotCommand("import_from", "Импорт из игры"),
+        BotCommand("import_previous", "Загрузить прошлые пары"),
         BotCommand("myresult", "Мой результат"),
         BotCommand("info", "Инфо"),
     ]
