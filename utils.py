@@ -45,6 +45,11 @@ def derangement(items: list, forbidden: Optional[Set[Tuple[str, str]]] = None, p
             return dict(zip(items, rec))
 
 
+def _val(v: str) -> str:
+    """Пустое значение → '-'"""
+    return v.strip() if v and v.strip() else "-"
+
+
 def build_game_info(code: str, game: dict, user_id: int) -> str:
     parts = game["participants"]
     is_org = game.get("organizer") == user_id
@@ -53,18 +58,14 @@ def build_game_info(code: str, game: dict, user_id: int) -> str:
     lines = []
 
     intro = game.get("intro", "").strip()
-    if intro:
-        lines.append(f"📝 {intro}")
-    else:
-        lines.append("📝 Вступительное не задано")
+    lines.append(f"📝 {intro or '-'}")
 
     amount = game.get("gift_amount") or extract_amount(intro)
-    lines.append(f"💰 Сумма на подарок: {amount or '—'}")
+    lines.append(f"💰 Сумма на подарок: {_val(amount)}")
 
     lines.append(f"🆔 ID: {code}")
     lines.append("")
 
-    lines.append("── Участник ──")
     assignments = game.get("assignments", {})
     if user_id in assignments:
         rec_id = assignments[user_id]
@@ -73,18 +74,16 @@ def build_game_info(code: str, game: dict, user_id: int) -> str:
         rec_un = f" @{rec['username']}" if rec.get("username") else ""
         lines.append(f"🎁 Подопечный: {rec_name}{rec_un}")
         wish = rec.get("wishlist", "").strip()
-        if wish:
-            lines.append(f"💬 Подопечный желает: {wish}")
+        lines.append(f"💬 Подопечный желает: {_val(wish)}")
     else:
-        lines.append("🎁 Подопечный: —")
+        lines.append("🎁 Подопечный: -")
 
     my_wish = my_info.get("wishlist", "").strip()
-    lines.append(f"✨ Мое желание: {my_wish or '—'}")
+    lines.append(f"✨ Мое желание: {_val(my_wish)}")
     lines.append(f"👥 Участников: {len(parts)}")
 
     if is_org:
         lines.append("")
-        lines.append("── Организатор ──")
         drawn = "да" if assignments else "нет"
         lines.append(f"🎲 Розыгрыш: {drawn}")
         avoid = game.get("avoid_previous", False)
