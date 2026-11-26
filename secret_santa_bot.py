@@ -1,6 +1,6 @@
 """
-Secret Santa Telegram Bot — v1.12.0
-При создании спрашивает сумму после вступительного. Кнопка «Удалить».
+Secret Santa Telegram Bot — v1.12.1
+Упрощённый текст запроса вступительного.
 """
 
 import json
@@ -234,7 +234,7 @@ async def check_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─── Conversational state ───
 
 PROMPTS = {
-    "intro": "📝 Напишите вступительный текст (около 200 слов).\nНе забудьте указать сроки.",
+    "intro": "📝 Напишите вступительное слово.",
     "wish": "🎁 Напишите ваши пожелания к подарку.",
     "import_pairs": "🔗 Отправьте пары в формате:\n@user1:@user2 @user3:@user4",
     "amount": "💰 Укажите сумму на подарок (например: 3000 рублей или 50$)",
@@ -286,7 +286,6 @@ async def handle_awaiting(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if kind == "create_intro":
         intro = "" if text.lower() in ("пропустить", "skip", "-", "нет") else text
-        # Сохраняем intro и спрашиваем сумму
         context.user_data["pending_intro"] = intro
         context.user_data["awaiting"] = {"type": "create_amount"}
         await update.message.reply_text(PROMPTS["amount"] + "\n\nИли отправьте «пропустить».")
