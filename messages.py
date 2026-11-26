@@ -23,8 +23,6 @@ def create_success_message(code: str) -> str:
 HELP_TEXT = (
     "🎅 Secret Santa Bot\n\n"
     "/create — создать игру\n"
-    "/setintro — вступительное\n"
-    "/setamount — сумма на подарок\n"
     "/join CODE — вступить\n"
     "/mygames — мои игры\n"
     "/setwish — пожелания\n"
@@ -32,11 +30,10 @@ HELP_TEXT = (
     "/draw — розыгрыш\n"
     "/export — экспорт пар\n"
     "/close [all] — удалить\n"
-    "/avoid on|off\n"
-    "/import_previous\n"
-    "/import_from OLDCODE\n"
-    "/myresult\n"
-    "/info"
+    "/import_previous — загрузить прошлые пары\n"
+    "/myresult — мой результат\n"
+    "/info — информация\n\n"
+    "Вступительное, сумма и избегание настраиваются в меню игры (/mygames → Редактировать)."
 )
 
 
