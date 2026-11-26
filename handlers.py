@@ -22,6 +22,8 @@ from utils import (
 logger = logging.getLogger(__name__)
 START_TIME = time.time()
 
+NOT_ENOUGH = "Недостаточно участников! Должно быть больше 1."
+
 
 async def select_game(
     update: Update,
@@ -259,7 +261,7 @@ async def cmd_participants(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = [f"Участники {code} ({len(game['participants'])}):"]
     for uid, info in game["participants"].items():
         un = f"@{info['username']}" if info.get("username") else ""
-        lines.append(f"• {info['name']} {un} — {info['wishlist'] or '—'}")
+        lines.append(f"• {info['name']} {un} — {info['wishlist'] or '-'}")
     await update.message.reply_text("\n".join(lines))
 
 
@@ -270,7 +272,7 @@ async def cmd_draw(update: Update, context: ContextTypes.DEFAULT_TYPE):
     code, game = res
     parts = list(game["participants"].keys())
     if len(parts) < 2:
-        await update.message.reply_text("Нужно ≥2 участника")
+        await update.message.reply_text(NOT_ENOUGH)
         return
     forbidden = game.get("forbidden_pairs") if game.get("avoid_previous") else None
     game["assignments"] = derangement(parts, forbidden, game["participants"])
@@ -492,7 +494,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         parts = list(game["participants"].keys())
         if len(parts) < 2:
-            await query.edit_message_text("≥2 участника")
+            await query.edit_message_text(NOT_ENOUGH)
             return
         forbidden = game.get("forbidden_pairs") if game.get("avoid_previous") else None
         game["assignments"] = derangement(parts, forbidden, game["participants"])
@@ -517,7 +519,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         lines = [f"{code} ({len(game['participants'])}):"]
         for _, info in game["participants"].items():
-            lines.append(f"• {info['name']} — {info['wishlist'] or '—'}")
+            lines.append(f"• {info['name']} — {info['wishlist'] or '-'}")
         await query.edit_message_text("\n".join(lines))
         return
 
