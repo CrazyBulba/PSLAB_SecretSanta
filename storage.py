@@ -83,6 +83,18 @@ class GameManager:
             del self.games[code]
             self.save()
 
+    def delete_archive(self, code: str, organizer_id: int) -> bool:
+        """Удалить запись из архива (только свою)."""
+        before = len(self.archive)
+        self.archive = [
+            r for r in self.archive
+            if not (r.get("code") == code and r.get("organizer_id") == organizer_id)
+        ]
+        if len(self.archive) < before:
+            self.save_archive()
+            return True
+        return False
+
     def archive_game(self, code: str, organizer_id: int, organizer_name: str) -> Optional[Dict]:
         game = self.games.get(code)
         if not game or game.get("organizer") != organizer_id:
