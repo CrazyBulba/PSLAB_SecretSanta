@@ -111,8 +111,7 @@ class GameManager:
         }
         self.archive.append(record)
         self.save_archive()
-        # Удаляем из активных
-        self.delete(code)
+        # Игра остаётся в активных
         return record
 
     def user_archive(self, user_id: int) -> List[Dict]:
