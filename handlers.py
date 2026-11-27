@@ -263,33 +263,6 @@ async def cmd_mygames(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Ваши активные игры:", reply_markup=InlineKeyboardMarkup(buttons))
 
 
-async def cmd_setwish(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    res = await select_game(update, context, organizer=False, action="setwish_select")
-    if not res:
-        return
-    code, game = res
-    if context.args and not (context.args[0].upper() == code and len(context.args) == 1):
-        text = " ".join(context.args[1:] if context.args[0].upper() == code else context.args)
-        game["participants"][update.effective_user.id]["wishlist"] = text
-        manager.save()
-        await update.message.reply_text(f"✅ Пожелания для {code} сохранены.")
-        return
-    context.user_data["awaiting"] = {"type": "wish", "code": code}
-    await update.message.reply_text(PROMPTS["wish"])
-
-
-async def cmd_participants(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    res = await select_game(update, context, organizer=True, action="participants")
-    if not res:
-        return
-    code, game = res
-    lines = [f"Участники {code} ({len(game['participants'])}):"]
-    for uid, info in game["participants"].items():
-        un = f"@{info['username']}" if info.get("username") else ""
-        lines.append(f"• {info['name']} {un} — {info['wishlist'] or '-'}")
-    await update.message.reply_text("\n".join(lines))
-
-
 async def cmd_myresult(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await check_pending(update, context)
     uid = update.effective_user.id
@@ -322,7 +295,6 @@ async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    # Отвечаем сразу, чтобы кнопка не зависала
     try:
         await query.answer()
     except Exception:
@@ -352,7 +324,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if game.get("organizer") == uid:
             buttons.append([
                 InlineKeyboardButton("🎲 Розыгрыш", callback_data=f"draw:{code}"),
-                InlineKeyboardButton("👥 Уч", callback_data=f"participants:{code}"),
+                InlineKeyboardButton("👥 Участники", callback_data=f"participants:{code}"),
             ])
             buttons.append([
                 InlineKeyboardButton("✏️ Редактировать", callback_data=f"edit:{code}"),
@@ -360,6 +332,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ])
         else:
             buttons.append([
+                InlineKeyboardButton("🎁 Мои пожелания", callback_data=f"setwish_select:{code}"),
                 InlineKeyboardButton("🚪 Выйти из игры", callback_data=f"leave_confirm:{code}"),
             ])
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons) if buttons else None)
@@ -521,9 +494,10 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if game.get("organizer") != uid:
             await query.edit_message_text("Только орг")
             return
-        lines = [f"{code} ({len(game['participants'])}):"]
+        lines = [f"Участники {code} ({len(game['participants'])}):"]
         for _, info in game["participants"].items():
-            lines.append(f"• {info['name']} — {info['wishlist'] or '-'}")
+            un = f" @{info['username']}" if info.get("username") else ""
+            lines.append(f"• {info['name']}{un}")
         await query.edit_message_text("\n".join(lines))
         return
 
@@ -556,8 +530,6 @@ async def setup(app):
         BotCommand("create", "Создать игру"),
         BotCommand("join", "Вступить"),
         BotCommand("mygames", "Мои игры"),
-        BotCommand("setwish", "Пожелания"),
-        BotCommand("participants", "Участники"),
         BotCommand("myresult", "Мой результат"),
         BotCommand("info", "Инфо"),
     ]
