@@ -59,6 +59,9 @@ def build_game_info(code: str, game: dict, user_id: int) -> str:
 
     intro = game.get("intro", "").strip()
     lines.append(f"📝 {intro or '-'}")
+    lines.append("")
+    lines.append("────────────────────")
+    lines.append("")
 
     amount = game.get("gift_amount") or extract_amount(intro)
     lines.append(f"💰 Сумма на подарок: {_val(amount)}")
