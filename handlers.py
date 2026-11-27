@@ -5,6 +5,7 @@
 import logging
 import time
 import re
+from datetime import datetime
 from typing import Optional, Tuple
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
@@ -293,6 +294,25 @@ async def cmd_myresult(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines))
 
 
+async def cmd_archive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    records = manager.user_archive(uid)
+    if not records:
+        await update.message.reply_text("Архив пуст.")
+        return
+
+    buttons = []
+    for rec in records:
+        draw = rec.get("last_draw_at") or rec.get("archived_at", "")[:10]
+        label = f"📁 {rec['code']} ({draw})"
+        buttons.append([InlineKeyboardButton(label, callback_data=f"archive_view:{rec['code']}")])
+
+    await update.message.reply_text(
+        "📁 Ваш архив:",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
 async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from pathlib import Path
     VERSION = Path("VERSION").read_text(encoding="utf-8").strip() if Path("VERSION").exists() else "unknown"
@@ -332,6 +352,25 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"✅ Удалено игр: {count}")
         return
 
+    if action == "archive_view":
+        records = manager.user_archive(uid)
+        rec = next((r for r in records if r["code"] == code), None)
+        if not rec:
+            await query.edit_message_text("Запись не найдена")
+            return
+        text = (
+            f"📁 Архив игры {rec['code']}\n\n"
+            f"Имя игры: {rec['code']}\n"
+            f"Дата создания: {rec.get('created_at', '-')}\n"
+            f"Организатор: {rec.get('organizer_name', '-')}\n"
+            f"Дата последнего розыгрыша: {rec.get('last_draw_at', '-')}\n"
+            f"Количество участников: {rec.get('participants_count', 0)}\n"
+            f"Результат розыгрыша: {rec.get('result', '-')}\n"
+            f"\nАрхивировано: {rec.get('archived_at', '-')}"
+        )
+        await query.edit_message_text(text)
+        return
+
     if code not in manager.games:
         await query.edit_message_text("Игра не найдена")
         return
@@ -347,6 +386,9 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ])
             buttons.append([
                 InlineKeyboardButton("✏️ Редактировать", callback_data=f"edit:{code}"),
+                InlineKeyboardButton("📁 В архив", callback_data=f"archive:{code}"),
+            ])
+            buttons.append([
                 InlineKeyboardButton("🗑 Удалить", callback_data=f"close:{code}"),
             ])
         else:
@@ -355,6 +397,24 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton("🚪 Выйти из игры", callback_data=f"leave_confirm:{code}"),
             ])
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons) if buttons else None)
+        return
+
+    if action == "archive":
+        if game.get("organizer") != uid:
+            await query.edit_message_text("Только организатор может архивировать")
+            return
+        org_info = game["participants"].get(uid, {})
+        org_name = org_info.get("name", "Организатор")
+        if org_info.get("username"):
+            org_name += f" @{org_info['username']}"
+        rec = manager.archive_game(code, uid, org_name)
+        if rec:
+            await query.edit_message_text(
+                f"✅ Игра {code} отправлена в архив.\n\n"
+                f"Посмотреть: /archive"
+            )
+        else:
+            await query.edit_message_text("Не удалось архивировать")
         return
 
     if action == "leave_confirm":
@@ -477,6 +537,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             game["assignments"] = derangement(parts, forbidden, game["participants"])
             for u in parts:
                 game["participants"][u]["notified"] = False
+            game["last_draw_at"] = datetime.now().strftime("%Y-%m-%d")
             manager.save()
             ok = 0
             for u in parts:
@@ -550,6 +611,7 @@ async def setup(app):
         BotCommand("join", "Вступить"),
         BotCommand("mygames", "Мои игры"),
         BotCommand("myresult", "Мой результат"),
+        BotCommand("archive", "Архив"),
         BotCommand("info", "Инфо"),
     ]
     await app.bot.set_my_commands(cmds)
